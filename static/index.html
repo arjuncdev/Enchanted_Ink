@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Enchanted Ink — The AI Diary That Writes Back</title>
+  <!-- Google Fonts: Cinzel, Cormorant Garamond, Dancing Script, Caveat, IM Fell English -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700;800&family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400;1,600&family=Dancing+Script:wght@500;600;700&family=Caveat:wght@500;600;700&family=IM+Fell+English:ital@0;1&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/diary.css">
+</head>
+<body>
+
+  <!-- Background Desk Scene Container with Ambient Candlelight Overlay -->
+  <div class="desk-background-layer"></div>
+  <div class="candle-overlay"></div>
+
+  <!-- Top Navigation Ribbon (Matching Reference Design) -->
+  <header class="top-nav">
+    <div class="brand-group">
+      <!-- Golden Glowing Feather Quill Icon -->
+      <div class="brand-quill-wrapper">
+        <svg class="brand-quill-svg" viewBox="0 0 64 64" fill="none">
+          <defs>
+            <linearGradient id="goldQuillGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#fff2a8" />
+              <stop offset="50%" stop-color="#d4af37" />
+              <stop offset="100%" stop-color="#9a7b20" />
+            </linearGradient>
+            <filter id="quillGlow" x="-20%" y="-20%" width="140%" height="140%">
+              <feGaussianBlur stdDeviation="2" result="blur" />
+              <feComposite in="SourceGraphic" in2="blur" operator="over" />
+            </filter>
+          </defs>
+          <path d="M54 6C42 10 24 24 16 38C12 45 10 52 8 58C14 56 21 54 28 50C42 42 56 24 60 12C61 9 58 5 54 6Z" fill="url(#goldQuillGrad)" filter="url(#quillGlow)" />
+          <path d="M8 58L22 44" stroke="#5a3d0b" stroke-width="2" stroke-linecap="round" />
+          <path d="M22 44C26 36 36 24 48 14" stroke="#fff9d6" stroke-width="1.2" stroke-linecap="round" opacity="0.8" />
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1 class="brand-title">ENCHANTED INK <span class="sparkle-symbol">✦</span></h1>
+        <span class="brand-subtitle">The AI Diary That Writes Back</span>
+      </div>
+    </div>
+
+    <div class="nav-actions">
+      <!-- Persona Mode Card: Tom Riddle -->
+      <button id="btnModeTomRiddle" class="nav-card-btn" type="button" title="Harry Potter Lore: Tom Riddle's Diary Spirit">
+        <span class="card-icon">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/>
+            <path d="M6 6h10M6 10h10M6 14h6"/>
+          </svg>
+        </span>
+        <div class="card-text-col">
+          <span class="card-title">TOM</span>
+          <span class="card-sub">RIDDLE</span>
+        </div>
+      </button>
+
+      <!-- Persona Mode Card: Regular Q&A (Active by Default / User Selected) -->
+      <button id="btnModeRegularQA" class="nav-card-btn active" type="button" title="Direct, factual answers for normal questions">
+        <span class="card-icon">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/>
+            <path d="M6 6h10M6 10h10M6 14h6"/>
+          </svg>
+        </span>
+        <div class="card-text-col">
+          <span class="card-title">REGULAR Q&A</span>
+          <span class="card-sub">Normal Questions</span>
+        </div>
+        <span class="card-caret">▼</span>
+      </button>
+
+      <!-- Gemini AI Status Card -->
+      <button id="btnGeminiConfig" class="nav-card-btn" type="button" title="Configure Google Gemini API Key">
+        <span class="card-icon star-cyan">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+            <path d="M12 2L14.4 9.6L22 12L14.4 14.4L12 22L9.6 14.4L2 12L9.6 9.6L12 2Z"/>
+          </svg>
+        </span>
+        <div class="card-text-col">
+          <span class="card-title">GEMINI AI</span>
+          <span class="card-sub status-active-text"><span class="status-diamond">◆</span> <span id="geminiStatusLabel">ACTIVE</span></span>
+        </div>
+      </button>
+
+      <!-- Memory Sanctum Card -->
+      <button id="btnOpenMemory" class="nav-card-btn" type="button" title="Autobiographical recall and Ebbinghaus forgetting curve memory">
+        <span class="card-icon">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">
+            <ellipse cx="12" cy="5" rx="8" ry="3"/>
+            <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/>
+            <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/>
+          </svg>
+        </span>
+        <div class="card-text-col">
+          <span class="card-title">MEMORY</span>
+          <span class="card-sub">SANCTUM</span>
+        </div>
+      </button>
+
+      <!-- Candlelight Card -->
+      <button id="btnCandle" class="nav-card-btn active" type="button" title="Toggle candlelight flicker ambiance">
+        <span class="card-icon candle-flame-icon">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M9 10h6v12H9z"/>
+            <path d="M12 10V7"/>
+            <path d="M12 3a2 2 0 0 1 2 2c0 1.5-2 3-2 3s-2-1.5-2-3a2 2 0 0 1 2-2z" fill="#f59e0b" stroke="none"/>
+          </svg>
+        </span>
+        <div class="card-text-col">
+          <span class="card-title">CANDLELIGHT</span>
+        </div>
+        <span class="card-caret">▼</span>
+      </button>
+
+      <!-- Settings Gear Button -->
+      <button id="btnSettingsMenu" class="nav-icon-btn" type="button" title="Diary Settings & Persona Options">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+
+      <!-- Hidden select for programmatic syncing -->
+      <select id="personaSelect" style="display: none;">
+        <option value="regular_qa">Regular Q&A (Normal Questions)</option>
+        <option value="tom_riddle">Tom Riddle (Harry Potter Lore)</option>
+        <option value="ancient_alchemist">The Hermetic Alchemist</option>
+        <option value="gentle_confidant">The Gentle Confidant</option>
+      </select>
+    </div>
+  </header>
+
+  <!-- Antique Diary Open Book (Matching Reference Design) -->
+  <main class="book-container">
+    <div class="book">
+
+      <!-- Corner Brass/Gold Metal Filigree Brackets on Leather Binding -->
+      <div class="leather-corner leather-corner-tl"></div>
+      <div class="leather-corner leather-corner-tr"></div>
+      <div class="leather-corner leather-corner-bl"></div>
+      <div class="leather-corner leather-corner-br"></div>
+
+      <!-- Double Parchment Pages Wrapper -->
+      <div class="pages-wrapper">
+        
+        <!-- Left Page: Chronicle of Inscribed Words -->
+        <div class="page page-left">
+          <!-- Page Corner Flourishes -->
+          <div class="page-flourish flourish-tl"></div>
+          <div class="page-flourish flourish-tr"></div>
+          <div class="page-flourish flourish-bl"></div>
+          <div class="page-flourish flourish-br"></div>
+
+          <!-- Page Header -->
+          <div class="page-header">
+            <div class="header-divider-flourish">
+              <span class="flourish-stem">⊰⊱</span>
+              <span class="header-title-text">CHRONICLE OF INSCRIBED WORDS</span>
+              <span class="flourish-stem">⊰⊱</span>
+            </div>
+            <span id="pageNumLeft" class="page-number">Page 1</span>
+          </div>
+
+          <!-- Chronicle Scroll Container with Realistic Ruled Lines -->
+          <div id="historyContainer" class="history-container ruled-lines">
+            <!-- Sample Historical Conversation matching the aesthetic -->
+            <div class="history-turn">
+              <div class="turn-meta-header">
+                <span class="author-label">You</span>
+                <span class="meta-dot">•</span>
+                <span class="timestamp-label">10:14 PM</span>
+              </div>
+              <div class="user-entry-record">droplets that become too heavy to remain suspended in clouds. As these droplets gather and cool, gravity pulls them downward to the surface of the Earth.</div>
+            </div>
+
+            <div class="turn-divider-ornament">
+              <span>❧◆❧</span>
+            </div>
+
+            <div class="history-turn">
+              <div class="turn-meta-header">
+                <span class="author-label">You</span>
+                <span class="meta-dot">•</span>
+                <span class="timestamp-label">10:16 PM</span>
+              </div>
+              <div class="user-entry-record">Solve for x: 3x + 15 = 45</div>
+            </div>
+
+            <div class="history-turn">
+              <div class="turn-meta-header ai-meta">
+                <span class="ai-sparkle-icon">✦</span>
+                <span class="author-label">AI Assistant</span>
+                <span class="meta-dot">•</span>
+                <span class="timestamp-label">10:16 PM</span>
+              </div>
+              <div class="ai-entry-record" data-persona="regular_qa">To solve for x, subtract 15 from both sides to get 3x = 30, and then divide by 3 to find that x = 10. This simple algebraic balance reveals the hidden value neatly concealed within the equation.</div>
+            </div>
+
+            <div class="turn-divider-ornament">
+              <span>❧◆❧</span>
+            </div>
+
+            <div class="history-turn">
+              <div class="turn-meta-header">
+                <span class="author-label">You</span>
+                <span class="meta-dot">•</span>
+                <span class="timestamp-label">10:18 PM</span>
+              </div>
+              <div class="user-entry-record">who is the CEO of google?</div>
+            </div>
+
+            <div class="history-turn">
+              <div class="turn-meta-header ai-meta">
+                <span class="ai-sparkle-icon">✦</span>
+                <span class="author-label">AI Assistant</span>
+                <span class="meta-dot">•</span>
+                <span class="timestamp-label">10:18 PM</span>
+              </div>
+              <div class="ai-entry-record" data-persona="regular_qa">The Chief Executive Officer of Google is Sundar Pichai, who has led the technology giant since December 2015. He oversees the company's vast digital empire and continuous innovations in search, artificial intelligence, and software.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Page: Live Ink Writing & Animated Calligraphy -->
+        <div class="page page-right">
+          <!-- Page Corner Flourishes -->
+          <div class="page-flourish flourish-tl"></div>
+          <div class="page-flourish flourish-tr"></div>
+          <div class="page-flourish flourish-bl"></div>
+          <div class="page-flourish flourish-br"></div>
+
+          <!-- Page Header -->
+          <div class="page-header">
+            <div class="header-divider-flourish">
+              <span id="inkStatusHeader" class="header-title-text">INK: AI RESPONSE</span>
+              <span id="confidenceMeter" style="display: none;"></span>
+            </div>
+            <span id="pageNumRight" class="page-number">Page 2</span>
+          </div>
+
+          <!-- Active Page Canvas Area with Horizontal Ruled Lines -->
+          <div class="active-page-content ruled-lines">
+            <!-- User Stylus / Mouse Drawing Canvas -->
+            <canvas id="inkCanvas"></canvas>
+
+            <!-- Animated Cursive Reply Calligraphy Canvas -->
+            <canvas id="calligraphyCanvas"></canvas>
+
+            <!-- Diegetic Clarification Banner -->
+            <div id="clarificationBanner" class="diegetic-clarification">
+              <div id="clarificationPromptText" class="clarification-text">
+                Thy ink was faint and troubled... Didst thou speak to me?
+              </div>
+              <div class="clarification-actions">
+                <input id="clarificationInput" type="text" class="clarification-input" placeholder="Type clarification or rewrite...">
+                <button id="btnClarifySubmit" class="btn-antique">Confirm Words</button>
+                <button id="btnClarifyDismiss" class="btn-antique">Rewrite Ink</button>
+              </div>
+            </div>
+
+            <!-- Bottom Page Status Ribbon matching Reference -->
+            <div class="page-bottom-status">
+              <div class="status-center-flourish">
+                <span class="flourish-wing">⊰⊱</span>
+                <span id="statusText" class="status-message">The page has spoken.</span>
+                <span class="flourish-wing">⊰⊱</span>
+              </div>
+              
+              <!-- Delicate Faint Hand-drawn Quill Sketch Motif on Bottom Right -->
+              <div class="faint-quill-sketch">
+                <svg viewBox="0 0 60 60" width="38" height="38" fill="none">
+                  <path d="M48 6C36 12 20 26 14 38C10 44 8 50 6 54C12 52 18 50 24 46C36 38 48 22 52 10Z" stroke="#8a6c47" stroke-width="1.2" opacity="0.45" stroke-linecap="round"/>
+                  <path d="M6 54L18 42" stroke="#8a6c47" stroke-width="1.4" opacity="0.45" stroke-linecap="round"/>
+                  <path d="M18 42C22 34 32 22 44 12" stroke="#8a6c47" stroke-width="0.9" opacity="0.35"/>
+                  <path d="M12 48C18 45 23 41 27 36" stroke="#8a6c47" stroke-width="0.8" opacity="0.3"/>
+                  <circle cx="5" cy="55" r="1.5" fill="#8a6c47" opacity="0.4"/>
+                </svg>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Center Spine Shadow & Red Silk Bookmark Ribbon with Bronze Filigree -->
+      <div class="book-spine"></div>
+      <div class="bookmark-ribbon">
+        <div class="ribbon-tail"></div>
+        <div class="ribbon-bronze-pendant">
+          <svg viewBox="0 0 24 32" width="22" height="30" fill="none">
+            <path d="M12 2L16 8L22 10L17 15L18 22L12 18L6 22L7 15L2 10L8 8Z" fill="#a4713c" stroke="#5d3b16" stroke-width="1"/>
+            <circle cx="12" cy="11" r="2.5" fill="#e8c282"/>
+            <path d="M12 18V28M8 24H16" stroke="#784d20" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- Interactive Control Ribbon (Matching Exact Reference Toolbar) -->
+  <footer class="toolbar-ribbon">
+    <!-- Quill Pen Tool -->
+    <button id="btnPen" class="btn-tool active" title="Write with ink quill">
+      <span class="tool-icon">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M18 2L22 6L8 20H4V16L18 2Z"/>
+          <path d="M14 6L18 10"/>
+        </svg>
+      </span>
+      <span class="tool-label">QUILL PEN</span>
+      <span class="tool-caret">▼</span>
+    </button>
+
+    <!-- Blot / Erase Tool -->
+    <button id="btnEraser" class="btn-tool" title="Blot or erase ink">
+      <span class="tool-icon">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8">
+          <circle cx="12" cy="12" r="8" stroke-dasharray="3 3"/>
+          <circle cx="12" cy="12" r="3" fill="currentColor"/>
+        </svg>
+      </span>
+      <span class="tool-label">BLOT / ERASE</span>
+    </button>
+
+    <!-- Undo Tool -->
+    <button id="btnUndo" class="btn-tool" title="Undo last ink stroke">
+      <span class="tool-icon">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M3 9h11a5 5 0 0 1 5 5v1a5 5 0 0 1-5 5H6"/>
+          <path d="M7 5L3 9l4 4"/>
+        </svg>
+      </span>
+      <span class="tool-label">UNDO</span>
+    </button>
+
+    <!-- Clean Slate Tool -->
+    <button id="btnClear" class="btn-tool" title="Clear page entirely">
+      <span class="tool-icon">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+        </svg>
+      </span>
+      <span class="tool-label">CLEAN SLATE</span>
+    </button>
+
+    <!-- Prominent Hero Submit Button (Emerald Green with Gold Glow) -->
+    <button id="btnSubmitTurn" class="btn-tool-hero" title="Commit your ink and summon the diary's answer">
+      <span class="hero-sparkle">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+          <path d="M12 2L14.4 9.6L22 12L14.4 14.4L12 22L9.6 14.4L2 12L9.6 9.6L12 2Z"/>
+        </svg>
+      </span>
+      <span class="hero-label">SUBMIT INK TO DIARY</span>
+    </button>
+
+    <!-- Previous Page -->
+    <button id="btnPrevPage" class="btn-tool" title="Turn to previous page">
+      <span class="tool-caret">‹</span>
+      <span class="tool-label">PREVIOUS</span>
+    </button>
+
+    <!-- Next Page -->
+    <button id="btnNextPage" class="btn-tool" title="Turn to next page">
+      <span class="tool-label">NEXT</span>
+      <span class="tool-caret">›</span>
+    </button>
+  </footer>
+
+  <!-- Memory Sanctum Privacy Modal -->
+  <div id="memoryModalOverlay" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h2>✦ Memory Sanctum — Autobiographical Recall</h2>
+        <button id="btnCloseMemory" class="modal-close">&times;</button>
+      </div>
+      <p class="modal-description">
+        The diary consolidates user propositions and tracks memory strength over time using the Ebbinghaus forgetting curve. You hold complete ownership and privacy over these records.
+      </p>
+      <div id="memoryListContainer" class="modal-content">
+        <!-- Rendered memory cards -->
+      </div>
+      <div class="modal-footer">
+        <span class="retention-info">Ebbinghaus Retention Decay: Half-life 7 Days</span>
+        <button id="btnPurgeMemories" class="btn-del">
+          Purge All Memories (Privacy Reset)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Gemini Key Configuration Modal -->
+  <div id="geminiModalOverlay" class="modal-overlay">
+    <div class="modal-box gemini-modal">
+      <div class="modal-header">
+        <h2>✨ Gemini AI — Enchanted Intelligence</h2>
+        <button id="btnCloseGeminiModal" class="modal-close">&times;</button>
+      </div>
+      <p class="modal-description">
+        Connect your <strong>Google Gemini API Key</strong> to give the diary deep knowledge of Harry Potter lore, Hogwarts history, science, mathematics, and intelligent answers to any question.
+      </p>
+      <div class="form-group">
+        <label for="geminiApiKeyInput">Google Gemini API Key:</label>
+        <input id="geminiApiKeyInput" type="password" placeholder="AIzaSy..." class="modal-input">
+      </div>
+      <div class="gemini-actions">
+        <a href="https://aistudio.google.com/app/apikey" target="_blank" class="gemini-link">
+          Get free key at Google AI Studio ↗
+        </a>
+        <button id="btnSaveGeminiKey" class="btn-antique-save">
+          Save & Activate
+        </button>
+      </div>
+      <div id="geminiKeyStatusMsg" class="gemini-status-msg"></div>
+    </div>
+  </div>
+
+  <!-- Settings / Personas Modal -->
+  <div id="settingsModalOverlay" class="modal-overlay">
+    <div class="modal-box settings-modal">
+      <div class="modal-header">
+        <h2>⚙️ Diary Personas & Settings</h2>
+        <button id="btnCloseSettingsModal" class="modal-close">&times;</button>
+      </div>
+      <div class="settings-content">
+        <div class="settings-section">
+          <h3>Active Conversational Soul</h3>
+          <div class="persona-options-grid">
+            <button class="persona-card-option" data-persona="tom_riddle">
+              <strong>🐍 Tom Marvolo Riddle</strong>
+              <span>Preserved soul from Hogwarts (1943). Poetic, mysterious, Slytherin lore.</span>
+            </button>
+            <button class="persona-card-option active" data-persona="regular_qa">
+              <strong>💡 Regular Q&A Assistant</strong>
+              <span>Direct, factual, and informative answers to any normal question.</span>
+            </button>
+            <button class="persona-card-option" data-persona="ancient_alchemist">
+              <strong>⚗️ The Hermetic Alchemist</strong>
+              <span>Mystical renaissance natural philosophy and cosmic introspection.</span>
+            </button>
+            <button class="persona-card-option" data-persona="gentle_confidant">
+              <strong>📖 The Gentle Confidant</strong>
+              <span>Warm, non-judgmental, emotionally supportive lifelong journal friend.</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="/static/js/audio.js"></script>
+  <script src="/static/js/canvas.js"></script>
+  <script src="/static/js/calligraphy.js"></script>
+  <script src="/static/js/memory_modal.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
