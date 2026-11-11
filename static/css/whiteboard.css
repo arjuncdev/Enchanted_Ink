@@ -611,6 +611,55 @@ body, html {
   display: flex;
 }
 
+.handwriting-feedback {
+  position: absolute;
+  left: 50%;
+  bottom: 155px;
+  transform: translateX(-50%);
+  display: none;
+  width: min(620px, calc(100vw - 32px));
+  padding: 14px 16px;
+  color: #283147;
+  background: rgba(255, 252, 244, 0.98);
+  border: 1px solid #d9c9a8;
+  border-radius: 14px;
+  box-shadow: 0 14px 38px rgba(35, 28, 20, 0.2);
+  z-index: 115;
+}
+
+.handwriting-feedback.visible { display: block; }
+.handwriting-feedback-message { font-size: 13px; line-height: 1.45; margin-bottom: 8px; }
+.handwriting-feedback textarea {
+  display: none;
+  width: 100%;
+  min-height: 52px;
+  resize: vertical;
+  border: 1px solid #c8b99d;
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: #1e293b;
+  background: #fff;
+  font: inherit;
+}
+.handwriting-feedback.editable textarea { display: block; }
+.handwriting-feedback-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.htr-action-primary, .htr-action-secondary {
+  border: 0;
+  border-radius: 7px;
+  padding: 7px 11px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.htr-action-primary { color: #fff; background: #4338ca; }
+.htr-action-secondary { color: #334155; background: #e8e1d4; }
+.handwriting-feedback:not(.retryable) #btnRetryHandwriting { display: none; }
+.handwriting-feedback:not(.editable) #btnRunCorrectedBoard { display: none; }
+.handwriting-feedback .dismiss-banner-btn { margin-left: auto; color: #64748b; }
+@media (max-width: 700px) {
+  .handwriting-feedback { bottom: 205px; }
+  .handwriting-feedback-actions { flex-wrap: wrap; }
+}
+
 @keyframes slideDown {
   from { opacity: 0; transform: translate(-50%, -10px); }
   to { opacity: 1; transform: translate(-50%, 0); }

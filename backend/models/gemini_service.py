@@ -72,6 +72,8 @@ PERSONA_PROMPTS = {
 class GeminiDiaryService:
     def __init__(self):
         self.api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        self.model_name = os.getenv("GEMINI_DIARY_MODEL", "gemini-3.8-flash").strip()
+        self.last_error = ""
 
     def set_api_key(self, key: str) -> bool:
         clean_key = key.strip()
@@ -143,13 +145,8 @@ class GeminiDiaryService:
         conversation_contents.append({"role": "user", "parts": [{"text": full_query}]})
 
         # Try resilient Gemini models with prioritized fallback chain
-        models_to_try = [
-            "gemini-flash-lite-latest",
-            "gemini-3.5-flash-lite",
-            "gemini-3.5-flash",
-            "gemini-flash-latest",
-            "gemini-2.5-flash"
-        ]
+        models_to_try = [self.model_name]
+        self.last_error = ""
         for model_name in models_to_try:
             try:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.api_key}"
@@ -180,9 +177,17 @@ class GeminiDiaryService:
                                         reply_text = reply_text.rstrip(",;:- ") + "."
                                 return reply_text
                 else:
-                    print(f"[GeminiService] Model {model_name} returned status {resp.status_code}: {resp.text[:120]}")
+                    try:
+                        provider_message = resp.json().get("error", {}).get("message", "")
+                    except Exception:
+                        provider_message = ""
+                    self.last_error = f"Gemini {model_name} HTTP {resp.status_code}: {provider_message[:240]}"
+                    print(f"[GeminiService] {self.last_error}")
+            except requests.Timeout:
+                self.last_error = f"Gemini {model_name} request timed out"
             except Exception as e:
-                print(f"[GeminiService] Error calling {model_name}: {e}")
+                self.last_error = f"Gemini {model_name} request failed ({type(e).__name__})"
+                print(f"[GeminiService] {self.last_error}")
 
         return None
 

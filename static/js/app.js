@@ -32,6 +32,7 @@ class EnchantedInkApp {
     this._bindEvents();
     this._loadPageHistory();
     this.checkGeminiStatus();
+    this.checkHtrStatus();
 
     // Hook pen rest callback from canvas engine
     this.canvasEngine.onPenRestCallback = () => {
@@ -180,6 +181,24 @@ class EnchantedInkApp {
     }
   }
 
+  async checkHtrStatus() {
+    try {
+      const response = await fetch('/api/v1/htr/status');
+      const status = await response.json();
+      if (status.available && status.model_source === 'baseline' && this.statusText) {
+        this.statusText.textContent = 'Handwriting ready with PRETRAINED BASELINE — NOT ENCHANTED INK FINE-TUNED. Please confirm each transcription.';
+      } else if (status.loading && this.statusText) {
+        this.statusText.textContent = 'Diary ready. Loading the local handwriting model…';
+      } else if (!status.available && this.statusText) {
+        this.statusText.textContent = `Diary ready. Handwriting model unavailable: ${status.error || 'setup required'}`;
+      } else if (status.available && !status.calibrated && this.statusText) {
+        this.statusText.textContent = 'TrOCR is loaded without validation calibration; transcriptions require confirmation.';
+      }
+    } catch (_) {
+      // The primary page status remains available if this diagnostic request fails.
+    }
+  }
+
   async saveGeminiKey() {
     const key = this.geminiApiKeyInput.value.trim();
     if (!key) {
@@ -225,9 +244,6 @@ class EnchantedInkApp {
 
     this.statusText.innerHTML = '<span class="quill-pulsing">✦ The diary drinks your ink...</span>';
 
-    // 1. Vanish the user's written ink completely (Harry Potter style: ink sinks into parchment!)
-    this.canvasEngine.vanishInk();
-
     try {
       const response = await fetch('/api/v1/process-turn', {
         method: 'POST',
@@ -259,13 +275,33 @@ class EnchantedInkApp {
         // Show diegetic clarification prompt
         if (this.clarificationPromptText) this.clarificationPromptText.textContent = data.ai_reply;
         if (this.clarificationBanner) this.clarificationBanner.classList.add('active');
+        if (this.clarificationInput) {
+          this.clarificationInput.value = data.transcription || '';
+          this.clarificationInput.focus();
+        }
         if (this.statusText) this.statusText.textContent = `The diary seeks clarity: "${data.transcription || 'unclear ink'}"`;
         if (window.diaryAudio) window.diaryAudio.playPageTurn();
         return;
       }
 
+      if (data.state === 'empty') {
+        this.statusText.textContent = 'No handwriting was detected. Your page is still here; try writing again.';
+        return;
+      }
+
+      if (!data.ai_reply || data.state !== 'completed') {
+        throw new Error(data.detail || 'The diary did not complete this turn.');
+      }
+
       if (this.clarificationBanner) this.clarificationBanner.classList.remove('active');
-      if (this.statusText) this.statusText.textContent = "The diary answers in a flowing hand...";
+      // Clear the input only after a successful reply. Errors and clarifications
+      // leave the original strokes available for correction or another attempt.
+      this.canvasEngine.vanishInk();
+      if (this.statusText) {
+        this.statusText.textContent = data.reply_source === 'local_fallback'
+          ? `Local reply used${data.reply_warning ? `; Gemini unavailable: ${data.reply_warning}` : ''}.`
+          : "The diary answers in a flowing hand...";
+      }
 
       // Record to chronicle immediately so full text is visible on the left page without delay
       this._recordToHistory(data.transcription || explicitTextHint, data.ai_reply, this.activePersona);
@@ -273,12 +309,13 @@ class EnchantedInkApp {
       // Clear previous calligraphy and animate the new response onto the clean page
       this.calligraphyRenderer.clear();
       this.calligraphyRenderer.animateText(data.ai_reply, () => {
-        if (this.statusText) this.statusText.textContent = "The page has spoken.";
+        if (this.statusText) this.statusText.textContent = data.reply_source === 'local_fallback'
+          ? 'Local reply complete; the provider status is shown above.' : "The page has spoken.";
       });
 
     } catch (e) {
       console.error("Turn submission error:", e);
-      this.statusText.textContent = `The binding wavers: ${e.message || "Connection interrupted. Try again."}`;
+      this.statusText.textContent = `The diary could not read or answer this page: ${e.message || "Connection interrupted. Try again."} Your ink is preserved.`;
     }
   }
 

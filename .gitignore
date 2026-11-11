@@ -5,3 +5,7 @@ venv/
 __pycache__/
 *.py[cod]
 backend/data/enchanted_diary.db
+models/trocr-iam/
+training-output/
+*.safetensors
+pytorch_model.bin

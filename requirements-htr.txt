@@ -1,0 +1,5 @@
+# Install CPU PyTorch first: pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Then install this file into the same environment used to run backend/app.py.
+transformers>=4.45,<5
+safetensors>=0.4
+sentencepiece>=0.2

@@ -3,8 +3,9 @@ import re
 import json
 import uuid
 import requests
-from typing import List, Dict, Optional, Any
-from pydantic import BaseModel, Field
+import math
+from typing import List, Dict, Optional, Any, Literal
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 from dotenv import load_dotenv, set_key
 
 ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env")
@@ -15,8 +16,9 @@ load_dotenv(ENV_PATH)
 # =========================================================================
 
 class WhiteboardObject(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     id: str = Field(default_factory=lambda: f"obj_{uuid.uuid4().hex[:8]}")
-    type: str  # "text", "sticky_note", "rectangle", "ellipse", "arrow", "connector"
+    type: Literal["text", "sticky_note", "rectangle", "ellipse", "arrow", "connector"]
     x: float = 0.0
     y: float = 0.0
     width: float = 160.0
@@ -32,12 +34,45 @@ class WhiteboardObject(BaseModel):
     label: Optional[str] = None
     ai_batch_id: Optional[str] = None
 
+    @field_validator("x", "y", "width", "height", "stroke_width")
+    @classmethod
+    def finite_geometry(cls, value, info):
+        if not math.isfinite(value):
+            raise ValueError(f"{info.field_name} must be finite")
+        if info.field_name in ("width", "height") and not 0 <= value <= 4000:
+            raise ValueError(f"{info.field_name} is outside supported bounds")
+        if info.field_name in ("width", "height") and value == 0 and info.data.get("type") not in ("arrow", "connector"):
+            raise ValueError(f"{info.field_name} must be positive for non-connectors")
+        if info.field_name in ("x", "y") and abs(value) > 100000:
+            raise ValueError(f"{info.field_name} is outside supported bounds")
+        return value
+
+    @field_validator("fill", "stroke")
+    @classmethod
+    def valid_color(cls, value):
+        if value is None or value.lower() == "none":
+            return value
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("color must be a six-digit hex color")
+        return value
+
+    @field_validator("text", "title", "label")
+    @classmethod
+    def limit_text(cls, value):
+        if value is not None and len(value) > 2000:
+            raise ValueError("object text exceeds 2000 characters")
+        return value
+
 class BoardCommandResponse(BaseModel):
     batch_id: str
     command: str
     summary: str
     objects: List[WhiteboardObject]
     warnings: Optional[List[str]] = []
+    provider_status: str = "fallback"
+    provider: str = "rule_based"
+    model: Optional[str] = None
+    fallback_used: bool = True
 
 # =========================================================================
 # AI System Prompt & Instruction
@@ -125,6 +160,8 @@ class BoardAIService:
     """
     def __init__(self):
         self.api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        self.model_name = os.getenv("GEMINI_BOARD_MODEL", "gemini-3.8-flash").strip()
+        self.last_error = ""
 
     def set_api_key(self, key: str) -> bool:
         clean_key = key.strip()
@@ -168,55 +205,45 @@ class BoardAIService:
         # Construct structured context description
         context_str = self._format_board_context(board_context)
 
-        # Call AI provider or fallback
-        raw_result = None
-        if self.is_configured():
-            raw_result = self._call_gemini(prompt_instruction, context_str)
-
+        # Call the configured provider; any offline rule response is explicitly
+        # marked so the client can never mistake it for a Gemini answer.
+        self.last_error = ""
+        raw_result = self._call_gemini(prompt_instruction, context_str) if self.is_configured() else None
+        provider_status = "gemini" if raw_result else "fallback"
+        warnings = [] if raw_result else [self.last_error or "Gemini is not configured; using a limited rule-based response."]
         if not raw_result:
             # Deterministic, high-quality rule-based fallback generator for offline or error states
             raw_result = self._generate_fallback_response(prompt_instruction, board_context)
 
         # Parse & Validate objects
+        raw_objects = raw_result.get("objects", [])
+        if not isinstance(raw_objects, list) or not raw_objects or len(raw_objects) > 80:
+            raise ValueError("Provider must return 1 to 80 whiteboard objects")
         validated_objects = []
         node_map = {}
+        for raw_obj in raw_objects:
+            if not isinstance(raw_obj, dict):
+                raise ValueError("Provider returned a non-object canvas item")
+            obj_id = str(raw_obj.get("id") or f"obj_{uuid.uuid4().hex[:8]}")
+            if obj_id in node_map:
+                raise ValueError(f"Duplicate whiteboard object id: {obj_id}")
+            payload = dict(raw_obj)
+            payload.update(id=obj_id, x=float(raw_obj.get("x", 0)) + target_x,
+                           y=float(raw_obj.get("y", 0)) + target_y,
+                           width=float(raw_obj.get("width", 160)),
+                           height=float(raw_obj.get("height", 80)), ai_batch_id=batch_id)
+            wb_obj = WhiteboardObject.model_validate(payload)
+            if wb_obj.font_size is not None and not 8 <= wb_obj.font_size <= 72:
+                raise ValueError("font size must be between 8 and 72")
+            if wb_obj.type in ("arrow", "connector") and (not wb_obj.from_id or not wb_obj.to_id):
+                raise ValueError("Connectors require source and target IDs")
+            validated_objects.append(wb_obj)
+            node_map[obj_id] = wb_obj
 
-        for raw_obj in raw_result.get("objects", []):
-            try:
-                # Sanitize coordinates
-                ox = float(raw_obj.get("x", 0.0)) + target_x
-                oy = float(raw_obj.get("y", 0.0)) + target_y
-                ow = max(float(raw_obj.get("width", 160.0)), 60.0)
-                oh = max(float(raw_obj.get("height", 80.0)), 40.0)
-
-                obj_type = raw_obj.get("type", "rectangle").lower()
-                if obj_type not in ["text", "sticky_note", "rectangle", "ellipse", "arrow", "connector"]:
-                    obj_type = "rectangle"
-
-                obj_id = str(raw_obj.get("id") or f"obj_{uuid.uuid4().hex[:6]}")
-                
-                wb_obj = WhiteboardObject(
-                    id=obj_id,
-                    type=obj_type,
-                    x=round(ox, 1),
-                    y=round(oy, 1),
-                    width=round(ow, 1),
-                    height=round(oh, 1),
-                    text=str(raw_obj.get("text", "")).strip(),
-                    title=str(raw_obj.get("title", "")).strip() if raw_obj.get("title") else None,
-                    fill=raw_obj.get("fill", "#ffffff"),
-                    stroke=raw_obj.get("stroke", "#2563eb"),
-                    stroke_width=float(raw_obj.get("stroke_width", 2.0)),
-                    font_size=int(raw_obj.get("font_size", 14)),
-                    from_id=raw_obj.get("from_id"),
-                    to_id=raw_obj.get("to_id"),
-                    label=raw_obj.get("label"),
-                    ai_batch_id=batch_id
-                )
-                validated_objects.append(wb_obj)
-                node_map[obj_id] = wb_obj
-            except Exception as ex:
-                print(f"[BoardAIService] Skipped malformed object: {ex}")
+        for obj in validated_objects:
+            if obj.type in ("arrow", "connector"):
+                if obj.from_id not in node_map or obj.to_id not in node_map:
+                    raise ValueError(f"Connector {obj.id} references a missing endpoint")
 
         # Post-process arrows to ensure endpoint alignment
         for obj in validated_objects:
@@ -240,7 +267,10 @@ class BoardAIService:
             command=clean_command,
             summary=summary,
             objects=validated_objects,
-            warnings=[]
+            warnings=warnings, provider_status=provider_status,
+            provider="Google Gemini" if provider_status == "gemini" else "Rule-based fallback",
+            model=self.model_name if provider_status == "gemini" else None,
+            fallback_used=provider_status != "gemini"
         )
 
     def _format_board_context(self, context: Optional[Dict[str, Any]]) -> str:
@@ -248,13 +278,19 @@ class BoardAIService:
             return "No previous objects on the board."
         
         parts = []
-        selected_text = context.get("selected_text", [])
-        if selected_text:
-            parts.append(f"Selected Objects Content:\n- " + "\n- ".join(selected_text))
-            
-        board_notes = context.get("existing_notes", [])
-        if board_notes:
-            parts.append(f"Existing Board Notes/Shapes:\n- " + "\n- ".join(board_notes[:8]))
+        objects = context.get("objects", [])
+        if objects:
+            compact = []
+            for obj in objects[:40]:
+                if not isinstance(obj, dict):
+                    continue
+                compact.append({k: obj.get(k) for k in ("id", "type", "text", "x", "y", "width", "height", "from_id", "to_id")})
+            parts.append(f"Board scope={context.get('scope', 'all')}; objects={json.dumps(compact, ensure_ascii=False)[:12000]}")
+        # Legacy clients remain readable during transition.
+        if context.get("selected_text"):
+            parts.append("Selected text: " + "; ".join(map(str, context["selected_text"][:20])))
+        if context.get("existing_notes"):
+            parts.append("Board notes: " + "; ".join(map(str, context["existing_notes"][:20])))
             
         return "\n\n".join(parts) if parts else "Empty canvas."
 
@@ -262,12 +298,8 @@ class BoardAIService:
         """
         Invokes Google Gemini with structured output.
         """
-        models_to_try = [
-            "gemini-2.5-flash",
-            "gemini-3.5-flash-lite",
-            "gemini-3.5-flash",
-            "gemini-flash-latest"
-        ]
+        models_to_try = [self.model_name]
+        self.last_error = ""
         
         user_message = f"""USER WHITEBOARD COMMAND:
 {prompt}
@@ -290,7 +322,7 @@ Please generate the optimal visual arrangement of whiteboard objects (diagram, f
                         "temperature": 0.4,
                         "maxOutputTokens": 4096,
                         "topP": 0.95,
-                        "response_mime_type": "application/json"
+                        "responseMimeType": "application/json"
                     }
                 }
                 resp = requests.post(url, json=payload, timeout=20.0)
@@ -304,15 +336,29 @@ Please generate the optimal visual arrangement of whiteboard objects (diagram, f
                             try:
                                 parsed = json.loads(clean_json, strict=False)
                             except Exception:
-                                # Try repairing trailing commas or control characters
                                 clean_json_fixed = re.sub(r',\s*([\]}])', r'\1', clean_json)
                                 parsed = json.loads(clean_json_fixed, strict=False)
                             if "objects" in parsed and isinstance(parsed["objects"], list):
                                 return parsed
+                            self.last_error = f"{model_name} returned an invalid structured response"
+                        else:
+                            self.last_error = f"{model_name} returned no parseable JSON"
+                    else:
+                        self.last_error = f"{model_name} returned no candidates"
                 else:
-                    print(f"[BoardAIService] Model {model_name} returned status {resp.status_code}")
+                    try:
+                        message = resp.json().get("error", {}).get("message", "")
+                    except Exception:
+                        message = resp.text[:300]
+                    self.last_error = f"Gemini {model_name} HTTP {resp.status_code}: {message[:300]}"
+                    print(f"[BoardAIService] {self.last_error}")
+            except requests.Timeout:
+                self.last_error = f"Gemini {model_name} request timed out"
+            except requests.RequestException as e:
+                self.last_error = f"Gemini network error: {type(e).__name__}"
             except Exception as e:
-                print(f"[BoardAIService] Exception with model {model_name}: {e}")
+                self.last_error = f"Gemini response parsing failed ({type(e).__name__})"
+                print(f"[BoardAIService] {self.last_error}: {e}")
 
         return None
 

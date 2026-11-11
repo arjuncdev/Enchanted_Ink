@@ -2,19 +2,23 @@ import os
 import sys
 import json
 import uuid
+import logging
+import threading
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 
 # Ensure backend root is on sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from models.htr_calibration import CalibratedHTREngine
+from models.trocr_htr import TrOCRService
 from models.memory_engine import EpisodicMemoryEngine
 from models.persona_engine import PersonaEngine
+from models.gemini_service import gemini_service
+from models.board_command_parser import extract_board_command
 from models.board_storage import BoardStorage
 from models.board_ai_service import board_ai_service, BoardCommandResponse
 
@@ -33,20 +37,50 @@ app.add_middleware(
 )
 
 # Instantiate core engines
-htr_engine = CalibratedHTREngine(temperature=1.45, rejection_threshold=0.65)
+htr_engine = TrOCRService()
 memory_engine = EpisodicMemoryEngine()
 persona_engine = PersonaEngine()
 board_storage = BoardStorage()
+
+
+@app.on_event("startup")
+def initialize_htr_model():
+    """Load HTR in the background so a cold model download does not block the API."""
+    def load_model():
+        try:
+            loaded = htr_engine.initialize()
+            if loaded:
+                logging.getLogger(__name__).info("HTR ready: %s (%s)", htr_engine.model_label, htr_engine.model_name)
+            else:
+                logging.getLogger(__name__).warning("HTR unavailable: %s", htr_engine.load_error)
+        except Exception:
+            logging.getLogger(__name__).exception("HTR initialization failed")
+
+    try:
+        threading.Thread(target=load_model, name="trocr-model-loader", daemon=True).start()
+    except Exception:
+        logging.getLogger(__name__).exception("HTR initialization failed")
 
 # =========================================================================
 # WHITEBOARD API ENDPOINTS
 # =========================================================================
 
 class BoardCommandRequest(BaseModel):
-    command: str
-    selected_ids: Optional[List[str]] = None
+    command: str = Field(min_length=1, max_length=2000)
+    selected_ids: Optional[List[str]] = Field(default=None, max_length=40)
     board_context: Optional[Dict[str, Any]] = None
     insertion_point: Optional[Dict[str, float]] = None
+
+    @field_validator("board_context")
+    @classmethod
+    def bounded_board_context(cls, value):
+        if value is not None:
+            if len(json.dumps(value, ensure_ascii=False)) > 24000:
+                raise ValueError("Board context exceeds 24 KB")
+            objects = value.get("objects", [])
+            if not isinstance(objects, list) or len(objects) > 40:
+                raise ValueError("Board context may include at most 40 objects")
+        return value
 
 class BoardSaveRequest(BaseModel):
     name: str = "Whiteboard"
@@ -58,9 +92,12 @@ class BoardCreateRequest(BaseModel):
 
 class BoardHTRRequest(BaseModel):
     strokes: Optional[List[Dict[str, Any]]] = None
-    image_base64: Optional[str] = ""
+    image_base64: Optional[str] = Field(default="", max_length=12_000_000)
     canvas_width: int = 800
     canvas_height: int = 600
+    request_id: Optional[str] = Field(default=None, max_length=100)
+    stroke_metadata: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=100)
+    retry_model: bool = False
 
 @app.post("/api/board/command")
 async def execute_board_command(req: BoardCommandRequest):
@@ -68,8 +105,15 @@ async def execute_board_command(req: BoardCommandRequest):
     Core @board AI interaction endpoint:
     Interprets user command and canvas context, returning validated native whiteboard objects.
     """
-    if not req.command or len(req.command.strip()) == 0:
+    if not req.command.strip():
         raise HTTPException(status_code=400, detail="Command cannot be empty.")
+    parsed_command = extract_board_command(req.command)
+    if parsed_command["command_detected"]:
+        if parsed_command["instruction_missing"]:
+            raise HTTPException(status_code=400, detail="Please add an instruction after @board.")
+        req.command = f"@board {parsed_command['command_text']}"
+    if req.board_context and req.board_context.get("scope") == "selected" and not req.board_context.get("objects"):
+        raise HTTPException(status_code=422, detail="Selected Objects scope requires at least one selected object.")
 
     try:
         response = board_ai_service.generate_board_objects(
@@ -79,50 +123,48 @@ async def execute_board_command(req: BoardCommandRequest):
         )
         return JSONResponse(status_code=200, content=response.model_dump())
     except Exception as e:
-        print(f"[BoardCommand] Error generating board objects: {e}")
-        # Safe fallback
-        fallback = board_ai_service._generate_fallback_response(req.command, req.board_context)
-        return JSONResponse(status_code=200, content={
-            "batch_id": f"ai_batch_{uuid.uuid4().hex[:8]}",
-            "command": req.command,
-            "summary": fallback.get("summary", "Generated whiteboard content."),
-            "objects": fallback.get("objects", []),
-            "warnings": [f"Handled with fallback: {str(e)}"]
-        })
+        print(f"[BoardCommand] Invalid response: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=502, detail=f"Board response was invalid; nothing was inserted. {e}")
 
 @app.post("/api/board/htr")
 async def recognize_board_handwriting(req: BoardHTRRequest):
     """
-    Online handwriting recognition for canvas strokes.
-    Converts hand-drawn ink into editable digital text.
+    Recognizes a cropped pen-stroke line with local TrOCR and reports any
+    constrained @board invocation separately from the transcription.
     """
+    request_id = req.request_id or uuid.uuid4().hex
     try:
-        if req.strokes and len(req.strokes) > 0:
-            res = htr_engine.recognize_online_strokes(
-                strokes=req.strokes,
-                canvas_width=req.canvas_width,
-                canvas_height=req.canvas_height
-            )
-            if res and res.get("text"):
-                return JSONResponse(status_code=200, content={
-                    "text": res["text"],
-                    "confidence": res.get("confidence", 0.90),
-                    "candidates": res.get("candidates", [])
-                })
-        
-        # Fallback to raster image if strokes not provided
-        if req.image_base64 and len(req.image_base64) > 100:
-            turn_res = htr_engine.process_turn(strokes=None, image_base64=req.image_base64)
-            return JSONResponse(status_code=200, content={
-                "text": turn_res.get("transcription", ""),
-                "confidence": turn_res.get("confidence", 0.70),
-                "candidates": []
-            })
-            
-        return JSONResponse(status_code=200, content={"text": "", "confidence": 0.0, "candidates": []})
+        if not req.image_base64:
+            return JSONResponse(status_code=400, content={"success": False, "status": "invalid_request",
+                "error": "A raster handwriting image is required by the TrOCR line model.", "request_id": request_id})
+        result = htr_engine.recognize(req.image_base64, force_retry=req.retry_model)
+        command = extract_board_command(result["transcription"])
+        clarification = bool(result["clarification_required"])
+        return JSONResponse(status_code=200, content={
+            "success": True, "status": "recognized" if result["transcription"] else "empty",
+            "text": result["transcription"], "confidence": result["calibrated_confidence"],
+            "raw_confidence": result["raw_confidence"],
+            "calibrated": result["confidence_status"] == "loaded",
+            "clarification_required": clarification,
+            "model_source": result.get("model_source"),
+            "model_name": result.get("model_name"),
+            "model_label": result.get("model_label"),
+            "command_detected": command["command_detected"],
+            "command_text": command["command_text"],
+            "instruction_missing": command["instruction_missing"],
+            "confidence_status": result["confidence_status"], "request_id": request_id
+        })
+    except ValueError as e:
+        return JSONResponse(status_code=422, content={"success": False, "status": "invalid_image",
+            "error": str(e), "request_id": request_id})
+    except RuntimeError as e:
+        print(f"[BoardHTR:{request_id}] {type(e).__name__}: {e}")
+        return JSONResponse(status_code=503, content={"success": False, "status": "unavailable",
+            "error": str(e), "request_id": request_id})
     except Exception as e:
-        print(f"[BoardHTR] Error: {e}")
-        return JSONResponse(status_code=200, content={"text": "", "confidence": 0.0, "error": str(e)})
+        print(f"[BoardHTR:{request_id}] {type(e).__name__}: {e}")
+        return JSONResponse(status_code=500, content={"success": False, "status": "recognition_error",
+            "error": "Handwriting recognition failed.", "request_id": request_id})
 
 @app.get("/api/board/list")
 async def list_boards():
@@ -181,7 +223,8 @@ async def get_board_config_status():
     """Check AI provider configuration status."""
     return JSONResponse(content={
         "configured": board_ai_service.is_configured(),
-        "provider": "Google Gemini (gemini-2.5-flash / gemini-3.5-flash-lite)"
+        "provider": "Google Gemini",
+        "model": os.getenv("GEMINI_BOARD_MODEL", "gemini-3.8-flash")
     })
 
 @app.post("/api/board/config/key")
@@ -192,10 +235,10 @@ async def set_board_api_key(cfg: Dict[str, str]):
 
 
 class TurnRequest(BaseModel):
-    page_number: int = 1
-    image_base64: str = ""
+    page_number: int = Field(default=1, ge=1, le=100000)
+    image_base64: str = Field(default="", max_length=12_000_000)
     stroke_data: Optional[List[dict]] = None
-    user_text_hint: Optional[str] = None
+    user_text_hint: Optional[str] = Field(default=None, max_length=1000)
     persona_id: str = "tom_riddle"
 
 @app.post("/api/v1/process-turn")
@@ -211,28 +254,27 @@ async def process_turn(req: TurnRequest):
     """
     try:
         # Step 1: Handwriting Recognition & Calibration
-        htr_result = htr_engine.process_turn(strokes=req.stroke_data, image_base64=req.image_base64)
-
         has_hint = bool(req.user_text_hint and len(req.user_text_hint.strip()) > 0)
+        if has_hint:
+            transcription = req.user_text_hint.strip()
+            confidence = None
+            clarification_required = False
+            htr_result = {"transcription": transcription, "confidence": None,
+                          "confidence_status": "user_confirmed", "is_empty": False}
+        else:
+            htr_result = htr_engine.recognize(req.image_base64)
+            transcription = htr_result["transcription"]
+            confidence = htr_result["calibrated_confidence"]
+            clarification_required = htr_result["clarification_required"]
 
         if htr_result.get("is_empty") and not has_hint:
             return JSONResponse(status_code=200, content={
                 "transcription": "",
-                "confidence": 0.0,
+                "confidence": None,
                 "clarification_required": False,
-                "ai_reply": "The page awaits your quill... Write upon my parchment.",
-                "retrieved_memories": []
+                "ai_reply": "",
+                "retrieved_memories": [], "state": "empty"
             })
-
-        # If user provided an explicit hint/override (e.g. from the on-screen transcription inspector)
-        transcription = htr_result["transcription"]
-        if has_hint:
-            transcription = req.user_text_hint.strip()
-            htr_result["confidence"] = 0.95
-            htr_result["clarification_required"] = False
-
-        confidence = htr_result["confidence"]
-        clarification_required = htr_result["clarification_required"]
 
         # Step 2: Gating on Calibrated Uncertainty
         if clarification_required and not req.user_text_hint:
@@ -243,7 +285,7 @@ async def process_turn(req: TurnRequest):
                 "clarification_required": True,
                 "ai_reply": clarification_msg,
                 "retrieved_memories": [],
-                "debug": htr_result
+                "debug": htr_result, "state": "clarification_required"
             })
 
         # Step 3: Episodic Memory Retrieval
@@ -276,17 +318,25 @@ async def process_turn(req: TurnRequest):
             "clarification_required": False,
             "ai_reply": ai_reply,
             "retrieved_memories": memories,
-            "debug": htr_result
+            "debug": htr_result, "state": "completed",
+            "reply_source": persona_engine.last_reply_source,
+            "reply_warning": gemini_service.last_error if persona_engine.last_reply_source != "gemini" else None
         })
+    except RuntimeError as e:
+        print(f"[ProcessTurn] HTR unavailable: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        print(f"[ProcessTurn] Unexpected error handled gracefully: {e}")
-        return JSONResponse(status_code=200, content={
-            "transcription": "(Inscribed thought)",
-            "confidence": 0.70,
-            "clarification_required": False,
-            "ai_reply": "I felt the pressure of your quill upon my page. The ink stirs my memory... Tell me more.",
-            "retrieved_memories": []
-        })
+        print(f"[ProcessTurn] {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Diary turn failed. Your writing has been retained in the browser.")
+
+@app.get("/api/v1/htr/status")
+async def get_htr_status():
+    status = htr_engine.status()
+    status["inactivity_ms"] = max(500, min(10000, int(os.getenv("HTR_INACTIVITY_MS", "2200"))))
+    status["retry_available"] = True
+    return JSONResponse(content=status)
 
 @app.get("/api/v1/config/gemini-status")
 async def get_gemini_status():

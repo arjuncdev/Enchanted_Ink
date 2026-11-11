@@ -295,6 +295,17 @@
     </div>
   </div>
 
+  <section id="handwritingFeedback" class="handwriting-feedback" role="status" aria-live="polite" aria-atomic="true">
+    <div id="handwritingFeedbackMessage" class="handwriting-feedback-message"></div>
+    <textarea id="handwritingTranscription" rows="2" aria-label="Recognized handwriting or corrected @board command"
+      placeholder="If TrOCR is unavailable, enter the transcription here, for example: @board create a flowchart for login"></textarea>
+    <div class="handwriting-feedback-actions">
+      <button id="btnRetryHandwriting" type="button" class="htr-action-secondary">Retry recognition</button>
+      <button id="btnRunCorrectedBoard" type="button" class="htr-action-primary">Confirm &amp; run command</button>
+      <button id="btnDismissHandwriting" type="button" class="dismiss-banner-btn" title="Dismiss">✕</button>
+    </div>
+  </section>
+
   <!-- AI Notification / Undo AI Insert Banner -->
   <div id="aiNotificationBanner" class="ai-notification-banner">
     <span id="aiBannerMessage">✨ AI placed 14 objects onto the canvas</span>

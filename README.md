@@ -26,9 +26,10 @@ Instead of a conventional chatbot trapped in a sidebar, **the whiteboard is the 
    - **Native Object Synthesis:** Generates individual editable nodes, cards, and connectors—never a flat image or non-interactive bubble.
    - **Deterministic Spatial Layout:** Non-overlapping layouts for block diagrams, flowcharts, and mind maps.
    - **Undo AI Insert:** One-click removal of an entire AI insertion batch without disturbing earlier work.
-4. **Handwriting to Text (HTR):**
-   - Freehand strokes can be selected and converted into editable digital text via the calibrated online stroke HTR engine (`POST /api/board/htr`).
-   - If handwritten text includes an `@board` instruction, the system can execute it directly on the canvas!
+4. **Uncertainty-Aware Handwriting (TrOCR):**
+   - Diary canvas images are read by the configured local TrOCR checkpoint (`POST /api/v1/process-turn`).
+   - Decoder token log-probabilities form a length-normalized sequence score; validation-fitted temperature and threshold determine whether to ask for confirmation.
+   - If the checkpoint or calibration is missing, the diary reports that state and asks for confirmation; no handwriting phrase or confidence is fabricated.
 5. **Persistence & Export:**
    - Autosaves state to local storage and backend SQLite (`data/enchanted_diary.db`).
    - Multiple board management (create, switch, delete boards).
@@ -56,6 +57,8 @@ GEMINI_API_KEY=your_gemini_api_key_here
 ```
 *(Alternatively, configure the API key directly in the web UI via the **AI Ready** settings modal).*
 
+Diary and board Gemini models are configurable as `GEMINI_DIARY_MODEL` and `GEMINI_BOARD_MODEL`. The default is `gemini-3.8-flash`; select a model available to your API project if access differs. Structured output uses the current `responseMimeType` JSON field. For TrOCR, see [Training and deployment](#training-and-deployment). At startup, the service tries the configured Enchanted Ink checkpoint first, then the optional upstream handwritten baseline. The UI and status endpoint identify which model actually loaded.
+
 ### 3. Launch Application
 Run the startup script:
 
@@ -67,6 +70,8 @@ Or run via the virtual environment directly:
 ```bash
 ./venv/bin/python backend/app.py
 ```
+
+For an existing virtual environment, install dependencies with `./venv/bin/pip install -r requirements.txt`.
 
 Open your browser and navigate to:
 👉 **[http://localhost:8000](http://localhost:8000)**
@@ -121,7 +126,7 @@ Enchanted_Ink/
 │   ├── models/
 │   │   ├── board_ai_service.py     # Provider abstraction & Gemini structured JSON generation
 │   │   ├── board_storage.py        # SQLite persistent storage for named boards
-│   │   ├── htr_calibration.py      # Calibrated online handwriting recognition engine
+│   │   ├── trocr_htr.py            # Local TrOCR inference and calibrated sequence confidence
 │   │   ├── memory_engine.py        # Episodic memory engine
 │   │   └── persona_engine.py       # Conversational persona engine
 │   └── data/
@@ -134,7 +139,57 @@ Enchanted_Ink/
 │   │   └── whiteboard.js           # Fabric.js canvas controller, spatial engine & AI connector
 │   └── vendor/
 │       └── fabric.min.js           # Fabric.js 5.3 canvas library
+├── training/trocr_iam.py           # IAM writer-split training/evaluation workflow
 ├── run_prototype.sh                # Application launch script
 ├── .env.example                    # Environment configuration template
 └── README.md                       # Documentation
 ```
+
+## Training and deployment
+
+The current repository provides the TrOCR inference and calibration integration, but does not include trained weights or claim measured accuracy. The IAM dataset requires registration and manual download. Do not commit downloaded data, model weights, or calibration files.
+
+In Google Colab, install a CUDA-compatible PyTorch build and the training packages (`pip install -r requirements-htr.txt`), then:
+
+```bash
+python training/trocr_iam.py prepare --iam-root /content/iam --manifest /content/iam-lines.csv
+python training/trocr_iam.py train --manifest /content/iam-lines.csv --output /content/trocr-output --base-model microsoft/trocr-small-stage1
+```
+
+The manifest contains image path, transcript, and writer ID. The preparation command reads IAM `lines.txt`; verify the resulting manifest and image paths against the registered archive before training. The default is TrOCR `small-stage1` (pretrained only); it avoids starting from Microsoft's `small-handwritten` checkpoint, which is already fine-tuned on IAM and would contaminate a writer-held-out evaluation. Splitting is writer-disjoint (80/10/10); the script reports the number of writers and lines in each split, evaluates the pretrained baseline, fine-tunes with AdamW, gradient accumulation, mixed precision when CUDA is available, checkpoint resume and validation CER early stopping. It fits sequence-score temperature on validation data, evaluates CER/WER/ECE and risk/coverage on the untouched test split, and writes reliability and risk-coverage plots plus `calibration.json`.
+
+Copy the saved model directory and `calibration.json` to a local path outside Git, then set:
+
+```ini
+TROCR_CHECKPOINT=/absolute/path/to/trocr-output
+TROCR_CALIBRATION=/absolute/path/to/trocr-output/calibration.json
+HTR_ACCEPTANCE_THRESHOLD=0.72
+```
+
+Install CPU PyTorch and `requirements-htr.txt` in the same environment used to run the app:
+
+```bash
+./venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+./venv/bin/pip install -r requirements-htr.txt
+```
+
+At startup the service loads the configured local checkpoint first. If it is absent or fails to load and `TROCR_ALLOW_BASELINE_FALLBACK=true`, it downloads/caches `TROCR_BASELINE_MODEL` from Hugging Face (default `microsoft/trocr-small-handwritten`). This is a pretrained upstream model fine-tuned on IAM, not an Enchanted Ink fine-tuned checkpoint; the UI labels it `PRETRAINED BASELINE — NOT ENCHANTED INK FINE-TUNED`. Set `TROCR_ALLOW_BASELINE_FALLBACK=false` to disable network fallback. HTR status reports loaded model, source, calibration, and load error; retry explicitly from the handwriting panel after correcting setup. The line-oriented model may need better segmentation for full-page diary writing. Baseline confidence is uncalibrated, so every transcription requires confirmation and is not research evaluation.
+
+### Implemented status
+
+- Implemented: local checkpoint loading, shared processor preprocessing, token log-probability sequence scoring, explicit empty/error states, validation calibration file loading, confidence threshold clarification, automatic debounced pen-stroke collection and crop rasterization, constrained `@board` trigger extraction, editable confirmation/retry UI, typed/handwritten command routing, visible Gemini/fallback status, and safeguards against dissolving unrelated selected objects.
+- Implemented but not yet trained/evaluated: the IAM training, writer split, calibration and evaluation pipeline. No model metrics are available until the registered IAM data is processed and the Colab run completes.
+- The Enchanted Ink fine-tuned TrOCR checkpoint/calibration is not included in this checkout. When HTR dependencies and network access are available, the upstream IAM handwritten baseline can recognize pen ink, but is clearly labeled and always requires correction/confirmation because its confidence is uncalibrated. The UI preserves strokes and offers manual transcription if no model loads. The recognizer receives a crop of recent nearby strokes as one image, so multi-line commands may need user confirmation. Offline diary replies are local templates and rule-based `@board` content is limited and labeled as fallback.
+
+## API behavior
+
+- `GET /api/v1/htr/status`: checkpoint/calibration availability and acceptance threshold.
+- `POST /api/v1/process-turn`: TrOCR transcription, clarification gate, memory retrieval, persona reply and persistence. Low confidence never reaches memory or response generation until the user confirms/corrects.
+- `POST /api/board/htr`: TrOCR raster transcription for a crop built from recent pen strokes or selected canvas handwriting; response includes request ID, confidence/calibration status, and extracted command fields. No external handwriting API is used.
+- `POST /api/board/command`: provider-labelled editable canvas objects. Invalid structured output returns an HTTP error without inserting partial objects; offline rule responses include provider/model/fallback status and a warning.
+
+Automatic whiteboard recognition waits for `HTR_INACTIVITY_MS` (default 2200 ms) after the latest nearby pen stroke. It groups nearby strokes into one bounded crop, which also supports a command written across close lines. The canvas shows recognition, clarification, provider and completion states. On successful generation, only the strokes in that recognized command group are removed; Undo AI Insert restores those strokes and removes only that generated batch.
+
+### Try handwritten `@board` locally
+
+Open `http://localhost:8000`, choose the pen, and write `@board create a flowchart for user login` on the canvas. Pause for the configured inactivity interval. A calibrated Enchanted Ink checkpoint can run high-confidence commands immediately; the upstream baseline always asks you to confirm or correct the recognized instruction before execution. If no model loads, the panel reports the cause, preserves the ink, and offers retry or manual transcription. If Gemini is unavailable, the rule-based response is visibly identified as fallback.

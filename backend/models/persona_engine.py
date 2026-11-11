@@ -26,6 +26,7 @@ class PersonaEngine:
     def __init__(self):
         self.personas = PERSONAS
         self.used_responses = set()
+        self.last_reply_source = "local_fallback"
 
     def generate_reply(
         self,
@@ -49,11 +50,13 @@ class PersonaEngine:
                     persona_id=persona_id
                 )
                 if gemini_reply and len(gemini_reply.strip()) > 0:
+                    self.last_reply_source = "gemini"
                     return gemini_reply.strip()
             except Exception as e:
                 print(f"[PersonaEngine] Gemini call failed, using dynamic engine: {e}")
 
         # --- 2. Dynamic Context-Aware Fallback Engine ---
+        self.last_reply_source = "local_fallback"
         query_clean = user_query.strip()
         query_lower = query_clean.lower()
         turn_count = len(history) if history else 0

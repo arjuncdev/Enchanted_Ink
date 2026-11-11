@@ -65,6 +65,7 @@ class KritaInkingEngine {
     if (this.app.isSpacePressed || (e.button !== 0 && e.pointerType !== 'pen')) return;
 
     this.isDrawing = true;
+    this.app.beginInkStroke();
     this.currentPointerId = e.pointerId;
     try {
       e.target.setPointerCapture(e.pointerId);
@@ -161,6 +162,10 @@ class KritaInkingEngine {
     this.canvas.requestRenderAll();
     this.app.pushHistoryState();
 
+    // Debounced recognition collects this stroke with nearby new strokes so a
+    // handwritten multi-line command becomes one bounded image request.
+    this.app.queueAutomaticHandwriting(path);
+
     this.rawPoints = [];
     this.smoothedPoints = [];
   }
@@ -253,6 +258,12 @@ class WhiteboardApp {
     this.currentBoardId = 'default';
     this.boardName = 'Main Whiteboard';
     this.lastAiBatchId = null;
+    this.lastAiSourceStrokes = [];
+    this.htrDebounceMs = 2200;
+    this.htrDebounceTimer = null;
+    this.pendingInkStrokes = [];
+    this.lastHtrStrokeGroup = [];
+    this.htrBusy = false;
 
     this.init();
   }
@@ -268,11 +279,13 @@ class WhiteboardApp {
     this.initToolHandlers();
     this.initShapeCreation();
     this.initAiCommandBar();
+    this.initHandwritingFeedback();
     this.initSelectionEvents();
     this.initKeyboardShortcuts();
     this.initStorageAndPersistence();
     this.initExportImport();
     this.checkGeminiConfig();
+    this.loadHandwritingConfig();
   }
 
   initCanvas() {
@@ -906,6 +919,246 @@ class WhiteboardApp {
     });
   }
 
+  initHandwritingFeedback() {
+    document.getElementById('btnDismissHandwriting')?.addEventListener('click', () => {
+      document.getElementById('handwritingFeedback')?.classList.remove('visible');
+    });
+    document.getElementById('btnRetryHandwriting')?.addEventListener('click', () => {
+      if (this.lastHtrStrokeGroup.length) {
+        this.recognizeStrokeGroup(this.lastHtrStrokeGroup, this.lastHtrAutomatic, true);
+      }
+    });
+    document.getElementById('btnRunCorrectedBoard')?.addEventListener('click', () => {
+      this.runCorrectedHandwritingCommand();
+    });
+  }
+
+  async loadHandwritingConfig() {
+    try {
+      const response = await fetch('/api/v1/htr/status');
+      if (!response.ok) return;
+      const status = await response.json();
+      if (Number.isFinite(status.inactivity_ms)) {
+        this.htrDebounceMs = Math.max(500, Math.min(10000, status.inactivity_ms));
+      }
+    } catch (_) { /* Retain the safe local debounce default. */ }
+  }
+
+  setHandwritingStatus(message, { editable = false, retryable = false, transcription = '' } = {}) {
+    const panel = document.getElementById('handwritingFeedback');
+    const label = document.getElementById('handwritingFeedbackMessage');
+    const input = document.getElementById('handwritingTranscription');
+    if (!panel || !label || !input) return;
+    label.textContent = message;
+    panel.classList.toggle('editable', editable);
+    panel.classList.toggle('retryable', retryable);
+    panel.classList.add('visible');
+    if (editable) {
+      input.value = transcription;
+      if (!transcription) input.focus();
+    }
+  }
+
+  beginInkStroke() {
+    clearTimeout(this.htrDebounceTimer);
+    this.setHandwritingStatus('Writing detected. I’ll check this recent ink when you pause.');
+  }
+
+  strokePointBounds(stroke) {
+    const points = stroke && Array.isArray(stroke.rawPoints) ? stroke.rawPoints : [];
+    if (!points.length) return null;
+    const xs = points.map(point => point.x);
+    const ys = points.map(point => point.y);
+    return { left: Math.min(...xs), top: Math.min(...ys), right: Math.max(...xs),
+      bottom: Math.max(...ys), width: Math.max(1, Math.max(...xs) - Math.min(...xs)),
+      height: Math.max(1, Math.max(...ys) - Math.min(...ys)) };
+  }
+
+  strokesBelongTogether(first, next) {
+    const a = this.strokePointBounds(first);
+    const b = this.strokePointBounds(next);
+    if (!a || !b) return false;
+    const gapX = Math.max(0, a.left - b.right, b.left - a.right);
+    const centerA = (a.top + a.bottom) / 2;
+    const centerB = (b.top + b.bottom) / 2;
+    const lineHeight = Math.max(a.height, b.height, 24);
+    return gapX <= Math.max(420, Math.max(a.width, b.width) * 0.9) &&
+      Math.abs(centerA - centerB) <= lineHeight * 3.2 + 28;
+  }
+
+  queueAutomaticHandwriting(stroke) {
+    if (!stroke || !stroke.rawPoints?.length) return;
+    if (this.pendingInkStrokes.length &&
+        !this.strokesBelongTogether(this.pendingInkStrokes[this.pendingInkStrokes.length - 1], stroke)) {
+      const earlier = this.pendingInkStrokes;
+      this.pendingInkStrokes = [];
+      clearTimeout(this.htrDebounceTimer);
+      this.recognizeStrokeGroup(earlier, true);
+    }
+    this.pendingInkStrokes.push(stroke);
+    clearTimeout(this.htrDebounceTimer);
+    this.htrDebounceTimer = setTimeout(() => {
+      const group = this.pendingInkStrokes;
+      this.pendingInkStrokes = [];
+      this.recognizeStrokeGroup(group, true);
+    }, this.htrDebounceMs);
+  }
+
+  rasterizeStrokeGroup(strokes) {
+    const bounds = strokes.map(stroke => this.strokePointBounds(stroke)).filter(Boolean);
+    if (!bounds.length) throw new Error('No handwriting points were available to recognize.');
+    const pad = 24;
+    const left = Math.min(...bounds.map(b => b.left)) - pad;
+    const top = Math.min(...bounds.map(b => b.top)) - pad;
+    const right = Math.max(...bounds.map(b => b.right)) + pad;
+    const bottom = Math.max(...bounds.map(b => b.bottom)) + pad;
+    const sourceWidth = Math.max(1, right - left);
+    const sourceHeight = Math.max(1, bottom - top);
+    const scale = Math.min(1, 2400 / sourceWidth, 1500 / sourceHeight);
+    const raster = document.createElement('canvas');
+    raster.width = Math.max(1, Math.ceil(sourceWidth * scale));
+    raster.height = Math.max(1, Math.ceil(sourceHeight * scale));
+    const ctx = raster.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, raster.width, raster.height);
+    ctx.save();
+    ctx.scale(scale, scale);
+    ctx.translate(-left, -top);
+    strokes.forEach(stroke => {
+      const points = stroke.rawPoints || [];
+      if (!points.length) return;
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      points.slice(1).forEach(point => ctx.lineTo(point.x, point.y));
+      ctx.strokeStyle = stroke.stroke || this.activeColor || '#4f46e5';
+      ctx.lineWidth = Math.max(2.5, Number(stroke.strokeWidth) || 3);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+      if (points.length === 1) {
+        ctx.beginPath();
+        ctx.arc(points[0].x, points[0].y, ctx.lineWidth / 2, 0, Math.PI * 2);
+        ctx.fillStyle = ctx.strokeStyle;
+        ctx.fill();
+      }
+    });
+    ctx.restore();
+    return { imageBase64: raster.toDataURL('image/png'), bounds: { x: left, y: top },
+      width: raster.width, height: raster.height };
+  }
+
+  async recognizeStrokeGroup(strokes, automatic = false, forceRetry = false) {
+    if (!strokes || !strokes.length) return;
+    if (this.htrBusy) {
+      if (automatic) this.pendingInkStrokes.push(...strokes);
+      return;
+    }
+    this.lastHtrStrokeGroup = strokes.slice();
+    this.lastHtrAutomatic = automatic;
+    this.htrBusy = true;
+    this.setHandwritingStatus('Recognising handwriting with the local TrOCR model…', { retryable: true });
+    const requestId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `htr_${Date.now()}`;
+    try {
+      const crop = this.rasterizeStrokeGroup(strokes);
+      this.setHandwritingStatus('Checking the recognized text for an @board command…', { retryable: true });
+      const response = await fetch('/api/board/htr', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_base64: crop.imageBase64, canvas_width: crop.width,
+          canvas_height: crop.height, request_id: requestId,
+          retry_model: forceRetry,
+          stroke_metadata: strokes.map(stroke => this.strokePointBounds(stroke)).filter(Boolean) })
+      });
+      let data;
+      try { data = await response.json(); }
+      catch (_) { throw new Error('The handwriting service returned an unreadable response.'); }
+      if (!response.ok || !data.success) {
+        const message = data.error || data.detail || 'Handwriting recognition failed.';
+        if (data.status === 'unavailable' || response.status === 503) {
+          this.setHandwritingStatus(`Handwriting model unavailable: ${message} Your ink is preserved. Retry after checking the model setup, or enter a transcription below.`,
+            { editable: true, retryable: true });
+          return;
+        }
+        throw new Error(message);
+      }
+      const recognized = (data.text || '').trim();
+      const modelNotice = data.model_label ? `${data.model_label}. ` : '';
+      if (!recognized) {
+        this.setHandwritingStatus(`${modelNotice}Could not recognize handwriting. Your strokes remain on the board; retry or edit the transcription.`,
+          { editable: true, retryable: true });
+        return;
+      }
+      if (!data.command_detected) {
+        if (!automatic) {
+          this.replaceHandwritingWithText(strokes, crop.bounds, recognized);
+          return;
+        }
+        this.setHandwritingStatus(`${modelNotice}Text recognized, but no @board invocation was found. No AI command was sent. “${recognized}”`,
+          { editable: true, retryable: true, transcription: recognized });
+        return;
+      }
+      if (data.instruction_missing) {
+        this.setHandwritingStatus('I found @board, but no instruction followed it. What should I create or explain?',
+          { editable: true, retryable: true, transcription: '@board ' });
+        return;
+      }
+      if (data.clarification_required) {
+        const confidence = data.calibrated ? `Calibrated confidence ${Math.round(data.confidence * 100)}%.` :
+          'Calibration is unavailable, so confirmation is required.';
+        this.setHandwritingStatus(`${modelNotice}${confidence} Confirm or correct the recognized instruction before execution.`,
+          { editable: true, retryable: true, transcription: `@board ${data.command_text}` });
+        return;
+      }
+      this.setHandwritingStatus(`${modelNotice}Command detected: ${data.command_text}. Generating board objects…`);
+      await this.executeAiCommand(`@board ${data.command_text}`, crop.bounds, strokes);
+    } catch (error) {
+      this.setHandwritingStatus(`Could not recognize handwriting: ${error.message}. Your original ink is preserved.`,
+        { editable: true, retryable: true });
+    } finally {
+      this.htrBusy = false;
+      if (this.pendingInkStrokes.length) {
+        const next = this.pendingInkStrokes.splice(0);
+        this.htrDebounceTimer = setTimeout(() => this.recognizeStrokeGroup(next, true), this.htrDebounceMs);
+      }
+    }
+  }
+
+  replaceHandwritingWithText(strokes, insertionPoint, text) {
+    strokes.forEach(stroke => {
+      if (this.canvas.getObjects().includes(stroke)) this.canvas.remove(stroke);
+    });
+    this.canvas.discardActiveObject();
+    this.addTextObject(insertionPoint.x, insertionPoint.y, text);
+    this.canvas.requestRenderAll();
+    this.pushHistoryState();
+    this.setHandwritingStatus(`Handwriting converted to editable text: “${text}”`);
+    this.lastHtrStrokeGroup = [];
+  }
+
+  runCorrectedHandwritingCommand() {
+    const field = document.getElementById('handwritingTranscription');
+    const text = (field?.value || '').trim();
+    const trigger = /^\s*(?:@\s*b[o0]ard|at\s+board)\b\s*[,.:;\-]?\s*/i;
+    const match = text.match(trigger);
+    if (!match) {
+      if (!this.lastHtrAutomatic && this.lastHtrStrokeGroup.length && text) {
+        const bounds = this.strokePointBounds(this.lastHtrStrokeGroup[0]) || { left: 40, top: 40 };
+        this.replaceHandwritingWithText(this.lastHtrStrokeGroup, { x: bounds.left, y: bounds.top }, text);
+        return;
+      }
+      this.setHandwritingStatus('Please start the corrected transcription with @board (or “at board”) so I know to run it. ',
+        { editable: true, retryable: true, transcription: text });
+      return;
+    }
+    const instruction = text.slice(match[0].length).trim();
+    if (!instruction) {
+      this.setHandwritingStatus('Please add an instruction after @board.',
+        { editable: true, retryable: true, transcription: text });
+      return;
+    }
+    this.setHandwritingStatus(`Confirmed command: ${instruction}. Sending it to the board service…`);
+    this.executeAiCommand(`@board ${instruction}`, null, this.lastHtrStrokeGroup);
+  }
+
   // =========================================================================
   // THE @BOARD AI ENGINE & INTERACTION
   // =========================================================================
@@ -940,7 +1193,7 @@ class WhiteboardApp {
     });
   }
 
-  async executeAiCommand(overrideCommand = null, overrideInsertionPoint = null) {
+  async executeAiCommand(overrideCommand = null, overrideInsertionPoint = null, sourceStrokes = null) {
     const input = document.getElementById('aiCommandInput');
     const submitBtn = document.getElementById('btnSubmitAiCommand');
 
@@ -950,39 +1203,31 @@ class WhiteboardApp {
       return;
     }
 
-    // Ensure @board tag
-    if (!command.toLowerCase().includes('@board')) {
-      command = `@board ${command}`;
-    }
-
-    // Determine target objects to dissolve: ONLY those where @board is mentioned!
-    const active = this.canvas.getActiveObject();
-    let targetsToDissolve = [];
-
-    if (active) {
-      // If user had specific objects selected when running @board, dissolve only those
-      targetsToDissolve = active.type === 'activeSelection' ? active.getObjects().slice() : [active];
-    } else {
-      // Search for any existing text or sticky note explicitly containing "@board"
-      this.canvas.getObjects().forEach(obj => {
-        let txt = '';
-        if (obj.text) txt = obj.text;
-        else if (obj.isStickyNote && obj._objects && obj._objects[1]) txt = obj._objects[1].text;
-        if (txt && txt.toLowerCase().includes('@board')) {
-          targetsToDissolve.push(obj);
-        }
-      });
-    }
-
-    // Dissolve ONLY the @board prompt area! Everything else remains intact.
-    if (targetsToDissolve.length > 0) {
-      this.dissolveBoardInk(targetsToDissolve);
+    // Normalize only explicit invocation variants; typed commands without a
+    // prefix continue to be treated as commands by the command bar.
+    const invocation = command.match(/^\s*(?:@\s*b[o0]ard|at\s+board)\b\s*[,.:;\-]?\s*/i);
+    command = invocation ? `@board ${command.slice(invocation[0].length).trim()}` : `@board ${command}`;
+    if (command.trim().toLowerCase() === '@board') {
+      this.setHandwritingStatus('I found @board, but no instruction followed it. What should I create or explain?',
+        { editable: true, retryable: true, transcription: '@board ' });
+      return;
     }
 
     // Determine scope and context
     const scopeSelect = document.getElementById('aiScopeSelect');
     const scope = scopeSelect ? scopeSelect.value : 'all';
+    if (scope === 'selected' && !this.canvas.getActiveObject() && !sourceStrokes?.length) {
+      this.showAiNotification('Select one or more objects before using Selected Objects scope.', false);
+      return;
+    }
     const boardContext = this.extractBoardContext(scope === 'selected');
+    if (scope === 'selected' && !this.canvas.getActiveObject() && sourceStrokes?.length) {
+      boardContext.objects = sourceStrokes.slice(0, 40).map(stroke => {
+        const bounds = this.strokePointBounds(stroke) || { left: 0, top: 0, width: 1, height: 1 };
+        return { id: String(stroke.id || ''), type: 'path', text: '', x: bounds.left,
+          y: bounds.top, width: bounds.width, height: bounds.height, selected: true };
+      });
+    }
 
     // Determine smart insertion point
     const insertionPoint = overrideInsertionPoint || this.calculateSmartInsertionPoint();
@@ -1004,16 +1249,43 @@ class WhiteboardApp {
         })
       });
 
-      const data = await response.json();
+      let data;
+      try { data = await response.json(); } catch (_) { throw new Error('The board service returned invalid JSON.'); }
+      if (!response.ok) throw new Error(data.detail || `Board request failed (${response.status}).`);
+      if (!data || typeof data.batch_id !== 'string' || !data.batch_id ||
+          !Array.isArray(data.objects) || data.objects.length === 0) {
+        throw new Error((data && data.summary) || 'The provider returned no valid canvas objects.');
+      }
+      if (data.objects.length > 80) throw new Error('The provider returned too many objects; nothing was inserted.');
+      this.validateAiObjects(data.objects);
       if (data && data.objects && data.objects.length > 0) {
         this.renderAiObjects(data.batch_id, data.objects, data.summary);
+        if (sourceStrokes?.length) {
+          this.lastAiSourceStrokes = sourceStrokes.slice();
+          sourceStrokes.forEach(stroke => {
+            if (this.canvas.getObjects().includes(stroke)) this.canvas.remove(stroke);
+          });
+          this.canvas.requestRenderAll();
+          this.pushHistoryState();
+          this.lastHtrStrokeGroup = [];
+        }
+        const mode = data.provider_status === 'gemini' ? 'Gemini' :
+          (data.provider_status === 'fallback' ? 'Rule-based fallback' : 'Provider');
+        const warning = data.warnings && data.warnings.length ? ` — ${data.warnings.join(' ')}` : '';
+        this.showAiNotification(`${mode}: ${data.summary || 'Objects added.'}${warning}`, true);
+        if (sourceStrokes?.length) {
+          this.setHandwritingStatus(`Completed: ${data.objects.length} editable objects placed. Provider: ${data.provider || mode}${data.fallback_used ? ' (fallback)' : ''}.`);
+        }
         if (input && !overrideCommand) input.value = '';
-      } else {
-        alert(data.summary || 'AI was unable to generate visual objects for this request.');
       }
     } catch (err) {
       console.error('[WhiteboardApp] AI Command Error:', err);
-      alert('Error contacting AI whiteboard service. Please check your network connection.');
+      this.showAiNotification(`Board command failed: ${err.message || 'Check the provider connection.'}`, false);
+      if (sourceStrokes?.length) {
+        this.setHandwritingStatus(`The board request failed: ${err.message || 'provider error'}. Original command ink is still on the canvas.`,
+          { editable: true, retryable: true,
+            transcription: document.getElementById('handwritingTranscription')?.value || command });
+      }
     } finally {
       if (submitBtn) {
         submitBtn.disabled = false;
@@ -1026,27 +1298,57 @@ class WhiteboardApp {
     }
   }
 
+  validateAiObjects(objects) {
+    const types = new Set(['text', 'sticky_note', 'rectangle', 'ellipse', 'arrow', 'connector']);
+    const ids = new Set();
+    objects.forEach((item) => {
+      if (!item || !types.has(item.type) || typeof item.id !== 'string' || !item.id || ids.has(item.id)) {
+        throw new Error('The provider returned an invalid or duplicate object ID/type. Nothing was inserted.');
+      }
+      ids.add(item.id);
+      for (const field of ['x', 'y', 'width', 'height']) {
+        if (!Number.isFinite(Number(item[field]))) throw new Error(`Invalid object ${field}; nothing was inserted.`);
+      }
+      if (Number(item.width) < 0 || Number(item.height) < 0 || Number(item.width) > 4000 || Number(item.height) > 4000) {
+        throw new Error('Object dimensions are outside supported limits. Nothing was inserted.');
+      }
+      if (String(item.text || '').length > 2000 || String(item.title || '').length > 2000) {
+        throw new Error('Object text is too long. Nothing was inserted.');
+      }
+      for (const color of [item.fill, item.stroke]) {
+        if (color != null && color !== 'none' && !/^#[0-9a-f]{6}$/i.test(color)) {
+          throw new Error('Object contains an invalid color. Nothing was inserted.');
+        }
+      }
+    });
+    objects.forEach(item => {
+      if (item.type === 'arrow' || item.type === 'connector') {
+        if (!item.from_id || !item.to_id || !ids.has(item.from_id) || !ids.has(item.to_id)) {
+          throw new Error('Connector references a missing object. Nothing was inserted.');
+        }
+      }
+    });
+  }
+
   extractBoardContext(selectedOnly = false) {
     const objects = this.canvas.getObjects();
     const active = this.canvas.getActiveObject();
-    const context = {
-      selected_text: [],
-      existing_notes: []
-    };
+    const context = { scope: selectedOnly ? 'selected' : 'all', objects: [] };
 
-    const targetList = (selectedOnly && active)
-      ? (active.type === 'activeSelection' ? active.getObjects() : [active])
+    const targetList = selectedOnly
+      ? (active ? (active.type === 'activeSelection' ? active.getObjects() : [active]) : [])
       : objects;
 
-    targetList.forEach(obj => {
+    targetList.slice(0, 40).forEach(obj => {
       let t = '';
       if (obj.text) t = obj.text;
       else if (obj.isStickyNote && obj._objects && obj._objects[1]) t = obj._objects[1].text;
-      
-      if (t && t.trim()) {
-        if (selectedOnly) context.selected_text.push(t.trim());
-        else context.existing_notes.push(t.trim());
-      }
+      const bounds = obj.getBoundingRect(true, true);
+      context.objects.push({ id: String(obj.id || ''), type: String(obj.type || 'unknown'),
+        text: String(t || '').trim().slice(0, 500), x: bounds.left, y: bounds.top,
+        width: bounds.width, height: bounds.height,
+        from_id: obj.fromId || obj.from_id || null, to_id: obj.toId || obj.to_id || null,
+        selected: selectedOnly });
     });
 
     return context;
@@ -1082,6 +1384,7 @@ class WhiteboardApp {
 
   renderAiObjects(batchId, objectsData, summaryText) {
     this.lastAiBatchId = batchId;
+    this.lastAiSourceStrokes = [];
     const createdObjects = [];
     const idMap = {};
 
@@ -1186,7 +1489,6 @@ class WhiteboardApp {
         fabricObj.originalId = item.id;
         idMap[item.id] = fabricObj;
         createdObjects.push(fabricObj);
-        this.canvas.add(fabricObj);
       }
     });
 
@@ -1198,7 +1500,10 @@ class WhiteboardApp {
       let y2 = arrowItem.y + (arrowItem.height || 0);
 
       // If connected by from_id / to_id, anchor to node centers
-      if (arrowItem.from_id && arrowItem.to_id && idMap[arrowItem.from_id] && idMap[arrowItem.to_id]) {
+      if (arrowItem.from_id && arrowItem.to_id) {
+        if (!idMap[arrowItem.from_id] || !idMap[arrowItem.to_id]) {
+          throw new Error(`Connector references a missing generated object (${arrowItem.id || 'unnamed'}).`);
+        }
         const src = idMap[arrowItem.from_id];
         const dst = idMap[arrowItem.to_id];
         const sb = src.getBoundingRect(true, true);
@@ -1221,8 +1526,17 @@ class WhiteboardApp {
       const arrow = this.createArrowObject(x1, y1, x2, y2, arrowItem.stroke || '#2563eb', arrowItem.label);
       arrow.aiBatchId = batchId;
       createdObjects.push(arrow);
-      this.canvas.add(arrow);
     });
+
+    // Construct and validate the entire batch before mutating the board.
+    try {
+      createdObjects.forEach(obj => this.canvas.add(obj));
+    } catch (error) {
+      createdObjects.forEach(obj => {
+        if (this.canvas.getObjects().includes(obj)) this.canvas.remove(obj);
+      });
+      throw error;
+    }
 
     this.canvas.requestRenderAll();
     this.pushHistoryState();
@@ -1291,6 +1605,15 @@ class WhiteboardApp {
     }
   }
 
+  showAiNotification(message, success = false) {
+    const banner = document.getElementById('aiNotificationBanner');
+    const msg = document.getElementById('aiBannerMessage');
+    const undo = document.getElementById('btnUndoAiInsert');
+    if (msg) msg.textContent = `${success ? '✨' : '⚠'} ${message}`;
+    if (undo) undo.style.display = success && this.lastAiBatchId ? '' : 'none';
+    if (banner) banner.classList.add('visible');
+  }
+
   hideAiNotificationBanner() {
     const banner = document.getElementById('aiNotificationBanner');
     if (banner) banner.classList.remove('visible');
@@ -1301,11 +1624,15 @@ class WhiteboardApp {
     const objects = this.canvas.getObjects().filter(o => o.aiBatchId === this.lastAiBatchId);
     if (objects.length > 0) {
       objects.forEach(obj => this.canvas.remove(obj));
+      this.lastAiSourceStrokes.forEach(stroke => {
+        if (!this.canvas.getObjects().includes(stroke)) this.canvas.add(stroke);
+      });
       this.canvas.discardActiveObject();
       this.canvas.requestRenderAll();
       this.pushHistoryState();
       this.hideAiNotificationBanner();
       this.lastAiBatchId = null;
+      this.lastAiSourceStrokes = [];
     }
   }
 
@@ -1323,67 +1650,12 @@ class WhiteboardApp {
     }
 
     const selectedList = active.type === 'activeSelection' ? active.getObjects() : [active];
-    const pathObjects = selectedList.filter(o => o.type === 'path' || o.isStroke);
-
-    if (pathObjects.length === 0) {
-      alert('No handwritten strokes found in the current selection.');
+    const paths = selectedList.filter(obj => obj.type === 'path' || obj.isStroke);
+    if (!paths.length) {
+      this.setHandwritingStatus('Select one or more pen strokes to recognize or convert.');
       return;
     }
-
-    // Collect coordinates from raw points preserved on the path
-    const strokes = [];
-    pathObjects.forEach(p => {
-      let pts = [];
-      if (p.rawPoints && p.rawPoints.length > 0) {
-        pts = p.rawPoints.map(pt => ({ x: pt.x, y: pt.y, pressure: pt.pressure || 0.5 }));
-      } else if (p.path) {
-        p.path.forEach(seg => {
-          if (seg.length >= 3) {
-            pts.push({ x: p.left + seg[1], y: p.top + seg[2] });
-          }
-        });
-      }
-      if (pts.length > 0) strokes.push({ points: pts });
-    });
-
-    const bound = active.getBoundingRect(true, true);
-
-    try {
-      const resp = await fetch('/api/board/htr', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          strokes: strokes,
-          canvas_width: Math.round(this.canvas.width),
-          canvas_height: Math.round(this.canvas.height)
-        })
-      });
-
-      const data = await resp.json();
-      if (data && data.text) {
-        // If recognized text contains @board:
-        // ONLY the strokes that formed @board dissolve!
-        // All other notes/drawings on the board remain intact!
-        if (data.text.toLowerCase().includes('@board')) {
-          this.dissolveBoardInk(pathObjects, () => {
-            const input = document.getElementById('aiCommandInput');
-            if (input) input.value = data.text;
-            this.executeAiCommand(data.text, { x: bound.left, y: bound.top });
-          });
-          return;
-        }
-
-        // Otherwise replace strokes with clean digital text box
-        pathObjects.forEach(p => this.canvas.remove(p));
-        this.canvas.discardActiveObject();
-        this.addTextObject(bound.left, bound.top, data.text);
-      } else {
-        alert('Could not clearly recognize handwriting. Try writing with clear strokes.');
-      }
-    } catch (err) {
-      console.error('[WhiteboardApp] HTR Recognition error:', err);
-      alert('Handwriting recognition failed to connect.');
-    }
+    this.recognizeStrokeGroup(paths, false);
   }
 
   // =========================================================================
