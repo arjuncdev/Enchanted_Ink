@@ -7,7 +7,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
 echo "=========================================================="
-echo "    ENCHANTED INK — The AI Diary That Writes Back         "
+echo "    ENCHANTED INK — AI-Powered Infinite Whiteboard        "
 echo "=========================================================="
 echo "Directory: $PROJECT_DIR"
 

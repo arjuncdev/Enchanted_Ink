@@ -1,9 +1,12 @@
+import os
 import sqlite3
-import math
 import time
+import math
 import json
 from datetime import datetime, timezone
 from typing import List, Dict, Optional
+
+DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "enchanted_diary.db")
 
 class EpisodicMemoryEngine:
     """
@@ -12,8 +15,9 @@ class EpisodicMemoryEngine:
       - Park et al. (ACM UIST 2023) [Generative Agents Memory Scoring]
       - Cheng et al. (ACL 2024) [TiM Knowledge Triples]
     """
-    def __init__(self, db_path: str = "backend/data/enchanted_diary.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: Optional[str] = None):
+        self.db_path = db_path or DEFAULT_DB_PATH
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._init_database()
 
     def _get_connection(self):

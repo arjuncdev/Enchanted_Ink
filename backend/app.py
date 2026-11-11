@@ -1,11 +1,13 @@
 import os
 import sys
+import json
+import uuid
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 # Ensure backend root is on sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -13,11 +15,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from models.htr_calibration import CalibratedHTREngine
 from models.memory_engine import EpisodicMemoryEngine
 from models.persona_engine import PersonaEngine
+from models.board_storage import BoardStorage
+from models.board_ai_service import board_ai_service, BoardCommandResponse
 
 app = FastAPI(
-    title="Enchanted Ink API",
-    description="The AI Diary That Writes Back — Calibrated Multimodal Uncertainty & Episodic Memory Backend",
-    version="1.0.0"
+    title="Enchanted Ink — AI Whiteboard API",
+    description="Interactive AI Whiteboard with spatial generation, handwriting recognition, and persistent canvas storage",
+    version="2.0.0"
 )
 
 app.add_middleware(
@@ -32,6 +36,160 @@ app.add_middleware(
 htr_engine = CalibratedHTREngine(temperature=1.45, rejection_threshold=0.65)
 memory_engine = EpisodicMemoryEngine()
 persona_engine = PersonaEngine()
+board_storage = BoardStorage()
+
+# =========================================================================
+# WHITEBOARD API ENDPOINTS
+# =========================================================================
+
+class BoardCommandRequest(BaseModel):
+    command: str
+    selected_ids: Optional[List[str]] = None
+    board_context: Optional[Dict[str, Any]] = None
+    insertion_point: Optional[Dict[str, float]] = None
+
+class BoardSaveRequest(BaseModel):
+    name: str = "Whiteboard"
+    data: Dict[str, Any]
+    thumbnail: Optional[str] = None
+
+class BoardCreateRequest(BaseModel):
+    name: str = "Untitled Board"
+
+class BoardHTRRequest(BaseModel):
+    strokes: Optional[List[Dict[str, Any]]] = None
+    image_base64: Optional[str] = ""
+    canvas_width: int = 800
+    canvas_height: int = 600
+
+@app.post("/api/board/command")
+async def execute_board_command(req: BoardCommandRequest):
+    """
+    Core @board AI interaction endpoint:
+    Interprets user command and canvas context, returning validated native whiteboard objects.
+    """
+    if not req.command or len(req.command.strip()) == 0:
+        raise HTTPException(status_code=400, detail="Command cannot be empty.")
+
+    try:
+        response = board_ai_service.generate_board_objects(
+            command=req.command,
+            board_context=req.board_context,
+            insertion_point=req.insertion_point
+        )
+        return JSONResponse(status_code=200, content=response.model_dump())
+    except Exception as e:
+        print(f"[BoardCommand] Error generating board objects: {e}")
+        # Safe fallback
+        fallback = board_ai_service._generate_fallback_response(req.command, req.board_context)
+        return JSONResponse(status_code=200, content={
+            "batch_id": f"ai_batch_{uuid.uuid4().hex[:8]}",
+            "command": req.command,
+            "summary": fallback.get("summary", "Generated whiteboard content."),
+            "objects": fallback.get("objects", []),
+            "warnings": [f"Handled with fallback: {str(e)}"]
+        })
+
+@app.post("/api/board/htr")
+async def recognize_board_handwriting(req: BoardHTRRequest):
+    """
+    Online handwriting recognition for canvas strokes.
+    Converts hand-drawn ink into editable digital text.
+    """
+    try:
+        if req.strokes and len(req.strokes) > 0:
+            res = htr_engine.recognize_online_strokes(
+                strokes=req.strokes,
+                canvas_width=req.canvas_width,
+                canvas_height=req.canvas_height
+            )
+            if res and res.get("text"):
+                return JSONResponse(status_code=200, content={
+                    "text": res["text"],
+                    "confidence": res.get("confidence", 0.90),
+                    "candidates": res.get("candidates", [])
+                })
+        
+        # Fallback to raster image if strokes not provided
+        if req.image_base64 and len(req.image_base64) > 100:
+            turn_res = htr_engine.process_turn(strokes=None, image_base64=req.image_base64)
+            return JSONResponse(status_code=200, content={
+                "text": turn_res.get("transcription", ""),
+                "confidence": turn_res.get("confidence", 0.70),
+                "candidates": []
+            })
+            
+        return JSONResponse(status_code=200, content={"text": "", "confidence": 0.0, "candidates": []})
+    except Exception as e:
+        print(f"[BoardHTR] Error: {e}")
+        return JSONResponse(status_code=200, content={"text": "", "confidence": 0.0, "error": str(e)})
+
+@app.get("/api/board/list")
+async def list_boards():
+    """List all saved whiteboard boards."""
+    boards = board_storage.list_boards()
+    return JSONResponse(content={"boards": boards})
+
+@app.post("/api/board/new")
+async def create_board(req: BoardCreateRequest):
+    """Create a new blank whiteboard board."""
+    new_id = f"board_{uuid.uuid4().hex[:8]}"
+    initial_data = {"version": "1.0", "objects": []}
+    success = board_storage.save_board(new_id, req.name, json.dumps(initial_data))
+    if success:
+        return JSONResponse(content={"id": new_id, "name": req.name})
+    raise HTTPException(status_code=500, detail="Failed to create board.")
+
+@app.get("/api/board/{board_id}")
+async def get_board(board_id: str):
+    """Retrieve full board data."""
+    board = board_storage.get_board(board_id)
+    if not board:
+        # If default board requested and not found, create it
+        if board_id == "default":
+            board_storage.save_board("default", "Main Whiteboard", json.dumps({"version": "1.0", "objects": []}))
+            board = board_storage.get_board("default")
+        else:
+            raise HTTPException(status_code=404, detail="Board not found.")
+    return JSONResponse(content=board)
+
+@app.post("/api/board/{board_id}/save")
+async def save_board(board_id: str, req: BoardSaveRequest):
+    """Save canvas objects to SQLite."""
+    success = board_storage.save_board(
+        board_id=board_id,
+        name=req.name,
+        data_json=json.dumps(req.data),
+        thumbnail=req.thumbnail
+    )
+    if success:
+        return JSONResponse(content={"status": "saved", "id": board_id})
+    raise HTTPException(status_code=500, detail="Failed to save board.")
+
+@app.delete("/api/board/{board_id}")
+async def delete_board(board_id: str):
+    """Delete a board."""
+    if board_id == "default":
+        raise HTTPException(status_code=400, detail="Cannot delete default board.")
+    success = board_storage.delete_board(board_id)
+    if success:
+        return JSONResponse(content={"status": "deleted", "id": board_id})
+    raise HTTPException(status_code=404, detail="Board not found.")
+
+@app.get("/api/board/config/status")
+async def get_board_config_status():
+    """Check AI provider configuration status."""
+    return JSONResponse(content={
+        "configured": board_ai_service.is_configured(),
+        "provider": "Google Gemini (gemini-2.5-flash / gemini-3.5-flash-lite)"
+    })
+
+@app.post("/api/board/config/key")
+async def set_board_api_key(cfg: Dict[str, str]):
+    key = cfg.get("api_key", "").strip()
+    success = board_ai_service.set_api_key(key)
+    return JSONResponse(content={"status": "saved" if success else "failed", "configured": board_ai_service.is_configured()})
+
 
 class TurnRequest(BaseModel):
     page_number: int = 1
