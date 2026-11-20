@@ -1,6 +1,5 @@
 /* =========================================================================
-   ENCHANTED INK — AI WHITEBOARD STYLESHEET
-   Modern, High-Productivity, Clean Spatial Canvas Interface
+   Main function: style the whiteboard canvas, toolbar, and interaction panels.
    ========================================================================= */
 
 :root {
@@ -478,6 +477,18 @@ body, html {
   gap: 8px;
   z-index: 50;
   pointer-events: auto;
+}
+
+.htr-engine-label {
+  align-self: center;
+  padding: 5px 12px;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  box-shadow: var(--shadow-floating);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .ai-command-card {

@@ -170,8 +170,8 @@ class BoardAIService:
     def __init__(self):
         self.api_key = os.environ.get("GEMINI_API_KEY", "").strip()
         self.model_name = os.getenv("GEMINI_BOARD_MODEL", "gemini-3.8-flash").strip()
-        self.fallback_model = os.getenv("GEMINI_BOARD_FALLBACK_MODEL",
-            os.getenv("GEMINI_HWR_FALLBACK_MODEL", "gemini-3.5-flash-lite")).strip()
+        self.fallback_model = os.getenv(
+            "GEMINI_BOARD_FALLBACK_MODEL", "gemini-3.5-flash-lite").strip()
         self.last_model_used = None
         self.last_error = ""
 
@@ -192,6 +192,7 @@ class BoardAIService:
     def is_configured(self) -> bool:
         return bool(self.api_key and len(self.api_key) > 5)
 
+    # Main function: generate and validate editable objects for an @board request.
     def generate_board_objects(
         self,
         command: str,
@@ -243,7 +244,7 @@ class BoardAIService:
                 # Deterministic rule-based fallback for offline or error states.
                 raw_result = self._generate_fallback_response(prompt_instruction, board_context)
 
-        # Parse & Validate objects
+        # Validate all provider output before returning any object to the canvas.
         raw_objects = raw_result.get("objects", [])
         if not isinstance(raw_objects, list) or not raw_objects or len(raw_objects) > 80:
             raise ValueError("Provider must return 1 to 80 whiteboard objects")

@@ -1,0 +1,6 @@
+# Optional tooling for independent TrOCR/Kraken/Google HTR experiments.
+# Install in the project virtual environment; Kraken may pull additional dependencies.
+kraken>=7.1.0
+matplotlib>=3.8,<4
+psutil>=5.9,<8
+huggingface_hub>=0.25

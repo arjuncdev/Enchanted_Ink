@@ -4,13 +4,14 @@ import json
 import math
 import os
 import tempfile
+import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from PIL import Image
 
 from models.trocr_htr import TrOCRService
-from models.google_htr_service import GoogleHandwritingRecognizer
 from models.board_ai_service import BoardAIService, WhiteboardObject
 from models.board_command_parser import extract_board_command
 from models.ai_provider import AIProviderSettings, OllamaService, ai_provider_settings, ollama_service
@@ -34,6 +35,33 @@ class TrOCRServiceTests(unittest.TestCase):
         self.assertEqual(service.status()["calibration"], "missing")
         with self.assertRaisesRegex(RuntimeError, "checkpoint"):
             service.recognize(data_url(Image.new("RGB", (20, 20), "black")))
+
+    def test_request_waits_for_background_model_initialization(self):
+        service = TrOCRService(checkpoint="/missing/trocr", allow_baseline=False)
+        service._initialized = True
+        service._loading = True
+        service._load_lock.acquire()
+        model = object()
+        processor = object()
+        started = threading.Event()
+        results = []
+
+        def wait_for_model():
+            started.set()
+            results.append(service.initialize())
+
+        worker = threading.Thread(target=wait_for_model)
+        worker.start()
+        self.assertTrue(started.wait(timeout=1))
+        self.assertTrue(worker.is_alive())
+        service._model = model
+        service._processor = processor
+        service._loading = False
+        service._load_lock.release()
+        worker.join(timeout=1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(results, [True])
 
     def test_empty_image_is_empty_not_a_phrase(self):
         service = TrOCRService(checkpoint="/missing/trocr")
@@ -61,6 +89,98 @@ class TrOCRServiceTests(unittest.TestCase):
         self.assertTrue(TrOCRService.requires_clarification(0.2, 0.72, True))
         self.assertFalse(TrOCRService.requires_clarification(0.9, 0.72, True))
 
+    def test_finetuned_inference_uses_shared_handwriting_preprocessing(self):
+        import torch
+
+        processed_image = Image.new("RGB", (160, 80), "white")
+
+        class FakeProcessor:
+            class Tokenizer:
+                eos_token_id = 2
+
+            tokenizer = Tokenizer()
+
+            def __call__(self, images, return_tensors):
+                self.images = images
+                return SimpleNamespace(pixel_values=torch.zeros((len(images), 3, 32, 32)))
+
+            def batch_decode(self, sequences, skip_special_tokens):
+                return ["recognized writing"]
+
+        class FakeModel:
+            def generate(self, pixel_values, **kwargs):
+                return SimpleNamespace(
+                    sequences=torch.tensor([[0, 1, 2]]),
+                    scores=(torch.tensor([[0.0, 2.0, -2.0]]),),
+                    beam_indices=torch.tensor([[0, 0, -1]]),
+                )
+
+            def compute_transition_scores(self, sequences, scores, beam_indices,
+                                         normalize_logits):
+                return torch.tensor([[-0.1, -0.2]])
+
+        service = TrOCRService(checkpoint="/missing", allow_baseline=False)
+        processor = FakeProcessor()
+        service._processor = processor
+        service._model = FakeModel()
+        service.model_source = "fine_tuned"
+        image = Image.new("RGB", (80, 40), "white")
+        image.putpixel((20, 20), (0, 0, 0))
+        with patch("models.htr_utils.prep_line_image", return_value=processed_image) as preprocess:
+            result = service.recognize(data_url(image))
+        preprocess.assert_called_once()
+        self.assertEqual(len(processor.images), 1)
+        self.assertIs(processor.images[0], processed_image)
+        self.assertEqual(result["transcription"], "recognized writing")
+
+    def test_multiline_handwriting_is_split_and_transcribed_in_reading_order(self):
+        import torch
+
+        class FakeProcessor:
+            class Tokenizer:
+                eos_token_id = 2
+
+            tokenizer = Tokenizer()
+
+            def __call__(self, images, return_tensors):
+                self.images = images
+                return SimpleNamespace(pixel_values=torch.zeros((len(images), 3, 32, 32)))
+
+            def batch_decode(self, sequences, skip_special_tokens):
+                return ["first line", "second line"]
+
+        class FakeModel:
+            def generate(self, pixel_values, **kwargs):
+                batch_size = pixel_values.shape[0]
+                sequences = torch.tensor([[0, 1, 2]] * batch_size)
+                logits = torch.tensor([[0.0, 2.0, -2.0]] * batch_size)
+                return SimpleNamespace(
+                    sequences=sequences,
+                    scores=(logits, logits),
+                    beam_indices=torch.tensor([[0, 0, -1]] * batch_size),
+                )
+
+            def compute_transition_scores(self, sequences, scores, beam_indices,
+                                         normalize_logits):
+                return torch.tensor([[-0.1, -0.2]] * len(sequences))
+
+        image = Image.new("RGB", (240, 100), "white")
+        for top in (15, 60):
+            for y in range(top, top + 8):
+                for x in range(20, 220):
+                    image.putpixel((x, y), (25, 25, 25))
+
+        service = TrOCRService(checkpoint="/missing", allow_baseline=False)
+        service._processor = FakeProcessor()
+        service._model = FakeModel()
+        service.model_source = "baseline"
+        with patch("models.htr_utils.prep_line_image", side_effect=lambda line: line) as preprocess:
+            result = service.recognize(data_url(image))
+
+        self.assertEqual(result["transcription"], "first line\nsecond line")
+        self.assertEqual(len(service._processor.images), 2)
+        self.assertEqual(preprocess.call_count, 2)
+
     def test_calibration_file_load_and_invalid_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "calibration.json")
@@ -73,51 +193,6 @@ class TrOCRServiceTests(unittest.TestCase):
                 json.dump({"temperature": -1}, stream)
             invalid = TrOCRService(checkpoint="/missing", calibration_path=path)
             self.assertEqual(invalid.calibration_status, "invalid")
-
-
-class GoogleHandwritingRecognizerTests(unittest.TestCase):
-    def test_google_image_fallback_sends_inline_image_and_returns_transcript(self):
-        service = GoogleHandwritingRecognizer(api_key="test-key", model="gemini-test")
-        response = Mock(status_code=200)
-        response.json.return_value = {"steps": [{"type": "model_output", "content": [
-            {"type": "text", "text": "@board draw a login flowchart"}
-        ]}]}
-        with patch.dict(os.environ, {"GEMINI_HWR_FALLBACK": "true"}), \
-             patch("models.google_htr_service.requests.post", return_value=response) as post:
-            result = service.recognize(data_url(Image.new("RGB", (120, 40), "white")))
-        self.assertEqual(result["transcription"], "@board draw a login flowchart")
-        self.assertEqual(result["recognizer"], "Google Gemini Vision")
-        self.assertEqual(result["model_source"], "google")
-        self.assertIsNone(result["calibrated_confidence"])
-        call = post.call_args
-        self.assertEqual(call.kwargs["headers"]["x-goog-api-key"], "test-key")
-        self.assertIn("/v1beta/interactions", call.args[0])
-        self.assertNotIn("api_key=", call.args[0])
-        image_part = call.kwargs["json"]["input"][1]
-        self.assertEqual(image_part["type"], "image")
-        self.assertEqual(image_part["mime_type"], "image/png")
-        self.assertTrue(image_part["data"])
-
-    def test_google_fallback_model_is_tried_after_primary_provider_error(self):
-        service = GoogleHandwritingRecognizer(api_key="test-key", model="gemini-primary")
-        primary = Mock(status_code=503)
-        primary.json.return_value = {"error": {"message": "temporarily unavailable"}}
-        backup = Mock(status_code=200)
-        backup.json.return_value = {"steps": [{"type": "model_output", "content": [
-            {"type": "text", "text": "@board draw a flowchart"}
-        ]}]}
-        with patch.dict(os.environ, {"GEMINI_HWR_FALLBACK": "true",
-                                     "GEMINI_HWR_FALLBACK_MODEL": "gemini-backup"}), \
-             patch("models.google_htr_service.requests.post", side_effect=[primary, backup]) as post:
-            result = service.recognize(data_url(Image.new("RGB", (120, 40), "white")))
-        self.assertEqual(result["model_name"], "gemini-backup")
-        self.assertEqual(post.call_count, 2)
-        self.assertNotIn("generationConfig", post.call_args.kwargs["json"])
-
-    def test_unconfigured_google_recognizer_does_not_make_request(self):
-        service = GoogleHandwritingRecognizer(api_key="")
-        with self.assertRaisesRegex(RuntimeError, "not configured"):
-            service.recognize(data_url(Image.new("RGB", (20, 20), "white")))
 
 
 class OllamaServiceTests(unittest.TestCase):

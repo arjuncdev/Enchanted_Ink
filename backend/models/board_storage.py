@@ -4,7 +4,7 @@ import time
 import json
 from typing import List, Dict, Optional
 
-DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "enchanted_diary.db")
+DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "whiteboard.db")
 
 class BoardStorage:
     """

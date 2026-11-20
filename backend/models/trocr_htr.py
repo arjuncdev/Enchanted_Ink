@@ -28,9 +28,9 @@ class TrOCRService:
                  threshold: Optional[float] = None, allow_baseline: Optional[bool] = None,
                  baseline_model: Optional[str] = None):
         configured_checkpoint = checkpoint if checkpoint is not None else os.getenv(
-            "TROCR_CHECKPOINT", os.getenv("TROCR_MODEL_PATH", "./models/trocr-iam"))
+            "TROCR_CHECKPOINT", os.getenv("TROCR_MODEL_PATH", "./stylus-model/stylus-finetuned"))
         configured_calibration = calibration_path if calibration_path is not None else os.getenv(
-            "TROCR_CALIBRATION", "./models/trocr-iam/calibration.json")
+            "TROCR_CALIBRATION", "./stylus-model/stylus-finetuned/calibration.json")
         self.checkpoint = _project_path(configured_checkpoint) if configured_checkpoint else ""
         self.calibration_path = _project_path(configured_calibration) if configured_calibration else ""
         self.baseline_model = baseline_model or os.getenv("TROCR_BASELINE_MODEL", BASELINE_MODEL)
@@ -108,6 +108,9 @@ class TrOCRService:
         """Load the local model first, then the configured Hub baseline if enabled."""
         if self.available and not force_retry:
             return True
+        if self._loading:
+            with self._load_lock:
+                return self.available
         if self._initialized and not force_retry:
             return False
         with self._load_lock:
@@ -128,6 +131,7 @@ class TrOCRService:
                 self._loading = False
                 return False
 
+            # Prefer the project checkpoint; only use Microsoft's baseline when configured.
             candidates = []
             if self.checkpoint_present:
                 candidates.append(("fine_tuned", self.checkpoint, "ENCHANTED INK FINE-TUNED CHECKPOINT"))
@@ -140,7 +144,10 @@ class TrOCRService:
                 try:
                     # Slow tokenizer avoids a protobuf-version conflict with the
                     # existing Gemini client dependency in this environment.
-                    processor = TrOCRProcessor.from_pretrained(model_id, use_fast=False)
+                    # Fine-tuned snapshots may publish tokenizer.json only, so
+                    # use the fast tokenizer for those local checkpoints.
+                    processor = TrOCRProcessor.from_pretrained(
+                        model_id, use_fast=(source == "fine_tuned"))
                     model = VisionEncoderDecoderModel.from_pretrained(model_id)
                     model.to(self.device).eval()
                     self._processor, self._model = processor, model
@@ -188,6 +195,43 @@ class TrOCRService:
         return stat.mean[0] >= 250 and stat.stddev[0] < 3.0
 
     @staticmethod
+    def split_text_lines(image: Image.Image) -> list[Image.Image]:
+        """Split vertically separated handwriting before using the line recognizer."""
+        import numpy as np
+
+        # Estimate the canvas background so dot-grid texture is not treated as ink.
+        rgb = np.asarray(image.convert("RGB"), dtype=np.int16)
+        background = np.median(rgb.reshape(-1, 3), axis=0)
+        foreground = np.max(np.abs(rgb - background), axis=2) > 100
+        occupied_rows = np.flatnonzero(
+            foreground.sum(axis=1) >= max(4, image.width // 150))
+        if not len(occupied_rows):
+            return [image]
+
+        spans = []
+        start = previous = int(occupied_rows[0])
+        for row in occupied_rows[1:]:
+            row = int(row)
+            if row - previous > 5:
+                spans.append((start, previous + 1))
+                start = row
+            previous = row
+        spans.append((start, previous + 1))
+        if len(spans) < 2 or len(spans) > 20:
+            return [image]
+
+        lines = []
+        for top, bottom in spans:
+            line_mask = foreground[top:bottom]
+            occupied_columns = np.flatnonzero(line_mask.any(axis=0))
+            if not len(occupied_columns):
+                continue
+            left = max(0, int(occupied_columns[0]) - 8)
+            right = min(image.width, int(occupied_columns[-1]) + 9)
+            lines.append(image.crop((left, max(0, top - 8), right, min(image.height, bottom + 8))))
+        return lines or [image]
+
+    @staticmethod
     def calibrated_confidence(mean_log_probability: float, temperature: float) -> float:
         z = max(-60.0, min(0.0, mean_log_probability / temperature))
         return math.exp(z)
@@ -204,19 +248,40 @@ class TrOCRService:
         self._ensure_model(force_retry=force_retry)
         try:
             import torch
-            pixel_values = self._processor(images=image, return_tensors="pt").pixel_values.to(self.device)
+            from .htr_utils import prep_line_image
+
+            line_images = [prep_line_image(line) for line in self.split_text_lines(image)]
+            pixel_values = self._processor(
+                images=line_images, return_tensors="pt").pixel_values.to(self.device)
             with torch.inference_mode():
-                generated = self._model.generate(pixel_values, num_beams=1, max_new_tokens=256,
-                                                  return_dict_in_generate=True, output_scores=True)
-                sequence = generated.sequences[0]
+                # Beam decoding follows the fine-tuned checkpoint's generation configuration.
+                generated = self._model.generate(
+                    pixel_values,
+                    num_beams=4,
+                    max_new_tokens=64,
+                    no_repeat_ngram_size=3,
+                    early_stopping=True,
+                    return_dict_in_generate=True,
+                    output_scores=True,
+                )
+                sequences = generated.sequences
+                decoded_lines = self._processor.batch_decode(
+                    sequences, skip_special_tokens=True)
+                transition_scores = self._model.compute_transition_scores(
+                    sequences,
+                    generated.scores,
+                    generated.beam_indices,
+                    normalize_logits=True,
+                )
                 step_log_probs = []
-                for index, logits in enumerate(generated.scores):
-                    token_id = int(sequence[index + 1])
-                    if token_id == self._processor.tokenizer.eos_token_id:
-                        break
-                    step_log_probs.append(float(torch.log_softmax(logits[0].float(), dim=-1)[token_id]))
-                token_ids = sequence.tolist()
-                text = self._processor.batch_decode([token_ids], skip_special_tokens=True)[0].strip()
+                for batch_index, sequence in enumerate(sequences):
+                    generated_tokens = sequence[1:1 + transition_scores.shape[1]]
+                    eos_positions = (generated_tokens == self._processor.tokenizer.eos_token_id).nonzero()
+                    token_count = int(eos_positions[0].item()) if len(eos_positions) else len(generated_tokens)
+                    step_log_probs.extend(
+                        transition_scores[batch_index, :token_count].float().tolist())
+            recognized_lines = [line.strip() for line in decoded_lines if line.strip()]
+            text = "\n".join(recognized_lines)
             if not text or not step_log_probs:
                 return self._result("", None, "empty", False)
             if len(text) > 1000:

@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/css/whiteboard.css">
+  <link rel="stylesheet" href="/static/css/whiteboard%20(Canvas%20UI%20Styles).css">
 </head>
 <body>
 
@@ -365,18 +365,18 @@
       </div>
       <div class="modal-body">
         <p style="font-size:13px;color:var(--text-secondary);line-height:1.4;">
-          Choose Google Gemini or Ollama. With the default local URL, prompts stay on your machine; a remote Ollama server receives the prompts you send it.
+          Choose Google AI or Ollama. Handwriting recognition sends ink to Google's external service. With the default local URL, board prompts stay on your machine; a remote Ollama server receives the prompts you send it.
         </p>
         <div style="margin-bottom:14px;">
           <label for="aiProviderSelect" style="font-size:12px;font-weight:600;display:block;margin-bottom:6px;">AI provider</label>
           <select id="aiProviderSelect" style="width:100%;padding:8px 12px;border:1px solid var(--border-medium);border-radius:var(--radius-sm);font-size:14px;">
-            <option value="gemini">Google Gemini (cloud)</option>
+            <option value="gemini">Google AI (cloud)</option>
             <option value="ollama">Ollama (local)</option>
           </select>
         </div>
         <div id="geminiProviderFields">
-          <label style="font-size:12px;font-weight:600;display:block;margin-bottom:6px;">Gemini API Key</label>
-          <input id="inputApiKey" type="password" placeholder="Enter your Gemini API key" autocomplete="off" style="width:100%;padding:8px 12px;border:1px solid var(--border-medium);border-radius:var(--radius-sm);font-size:14px;outline:none;">
+          <label style="font-size:12px;font-weight:600;display:block;margin-bottom:6px;">Google AI API Key</label>
+          <input id="inputApiKey" type="password" placeholder="Enter your Google AI API key" autocomplete="off" style="width:100%;padding:8px 12px;border:1px solid var(--border-medium);border-radius:var(--radius-sm);font-size:14px;outline:none;">
         </div>
         <div id="ollamaProviderFields" style="display:none;">
           <label for="ollamaBaseUrl" style="font-size:12px;font-weight:600;display:block;margin:10px 0 6px;">Ollama server URL</label>
@@ -395,6 +395,6 @@
 
   <!-- Scripts -->
   <script src="/static/vendor/fabric.min.js"></script>
-  <script src="/static/js/whiteboard.js"></script>
+  <script src="/static/js/whiteboard%20(Canvas%20Controller).js"></script>
 </body>
 </html>

@@ -2,8 +2,6 @@ import os
 import sys
 import json
 import uuid
-import logging
-import threading
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -15,16 +13,13 @@ from typing import Optional, List, Dict, Any, Literal
 # Ensure backend root is on sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from models.trocr_htr import TrOCRService
 from models.google_htr_service import google_htr_service
-from models.memory_engine import EpisodicMemoryEngine
-from models.persona_engine import PersonaEngine
-from models.gemini_service import gemini_service
 from models.ai_provider import ai_provider_settings, ollama_service
 from models.board_command_parser import extract_board_command
 from models.board_storage import BoardStorage
 from models.board_ai_service import board_ai_service, BoardCommandResponse
 
+# Main entry point: expose the whiteboard UI and coordinate its API services.
 app = FastAPI(
     title="Enchanted Ink — AI Whiteboard API",
     description="Interactive AI Whiteboard with spatial generation, handwriting recognition, and persistent canvas storage",
@@ -39,34 +34,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Instantiate core engines
-htr_engine = TrOCRService()
-memory_engine = EpisodicMemoryEngine()
-persona_engine = PersonaEngine()
+# Instantiate API services.
 board_storage = BoardStorage()
 
-
-@app.on_event("startup")
-def initialize_htr_model():
-    """Load HTR in the background so a cold model download does not block the API."""
-    def load_model():
-        try:
-            loaded = htr_engine.initialize()
-            if loaded:
-                logging.getLogger(__name__).info("HTR ready: %s (%s)", htr_engine.model_label, htr_engine.model_name)
-            else:
-                logging.getLogger(__name__).warning("HTR unavailable: %s", htr_engine.load_error)
-        except Exception:
-            logging.getLogger(__name__).exception("HTR initialization failed")
-
-    try:
-        threading.Thread(target=load_model, name="trocr-model-loader", daemon=True).start()
-    except Exception:
-        logging.getLogger(__name__).exception("HTR initialization failed")
 
 # =========================================================================
 # WHITEBOARD API ENDPOINTS
 # =========================================================================
+# These routes handle board generation, recognition, and persisted board state.
 
 class BoardCommandRequest(BaseModel):
     command: str = Field(min_length=1, max_length=2000)
@@ -132,65 +107,35 @@ async def execute_board_command(req: BoardCommandRequest):
 
 @app.post("/api/board/htr")
 async def recognize_board_handwriting(req: BoardHTRRequest):
-    """
-    Uses a fine-tuned local TrOCR model when available, with Google Gemini
-    Vision as an external handwriting fallback when local recognition is weak.
-    """
+    """Transcribe whiteboard handwriting with external Google Gemini Vision."""
     request_id = req.request_id or uuid.uuid4().hex
     try:
         if not req.image_base64:
             return JSONResponse(status_code=400, content={"success": False, "status": "invalid_request",
                 "error": "A raster handwriting image is required for recognition.", "request_id": request_id})
-        local_result = None
-        local_error = None
-        try:
-            local_result = await run_in_threadpool(
-                htr_engine.recognize, req.image_base64, force_retry=req.retry_model)
-        except ValueError:
-            raise
-        except RuntimeError as exc:
-            local_error = str(exc)
-
-        result = local_result
-        local_command = extract_board_command(local_result["transcription"]) if local_result else None
-        use_google_fallback = (google_htr_service.is_configured() and
-            (local_result is None or local_result.get("is_empty") or
-             local_result.get("model_source") != "fine_tuned" or
-             local_result.get("clarification_required") or not local_command["command_detected"]))
-        google_error = None
-        if use_google_fallback:
-            try:
-                result = await run_in_threadpool(google_htr_service.recognize, req.image_base64)
-            except ValueError:
-                raise
-            except RuntimeError as exc:
-                google_error = str(exc)
-                print(f"[BoardHTR:{request_id}] Google fallback failed: {google_error}")
-        if result is None:
-            details = "; ".join(error for error in (local_error, google_error) if error)
-            if not details:
-                details = "Install the HTR dependencies or configure GEMINI_API_KEY for Google handwriting recognition."
-            raise RuntimeError(details)
+        if not google_htr_service.is_configured():
+            raise RuntimeError(
+                "External handwriting recognition is not configured. Set GEMINI_API_KEY."
+            )
+        result = await run_in_threadpool(
+            google_htr_service.recognize, req.image_base64)
 
         command = extract_board_command(result["transcription"])
-        # Baseline and Google transcripts are uncalibrated; always confirm them
-        # before executing a handwritten board command.
-        clarification = bool(result["clarification_required"])
         return JSONResponse(status_code=200, content={
             "success": True, "status": "recognized" if result["transcription"] else "empty",
-            "text": result["transcription"], "confidence": result["calibrated_confidence"],
-            "raw_confidence": result["raw_confidence"],
-            "calibrated": result["confidence_status"] == "loaded",
-            "clarification_required": clarification,
+            "text": result["transcription"], "confidence": None,
+            "raw_confidence": None,
+            "calibrated": False,
+            "clarification_required": True,
             "model_source": result.get("model_source"),
             "model_name": result.get("model_name"),
             "model_label": result.get("model_label"),
-            "recognizer": result.get("recognizer", "Local TrOCR"),
-            "recognition_warning": google_error,
+            "recognizer": result.get("recognizer", "Google Gemini Vision"),
+            "recognition_engine": "gemini",
             "command_detected": command["command_detected"],
             "command_text": command["command_text"],
             "instruction_missing": command["instruction_missing"],
-            "confidence_status": result["confidence_status"], "request_id": request_id
+            "confidence_status": "google_unscored", "request_id": request_id
         })
     except ValueError as e:
         return JSONResponse(status_code=422, content={"success": False, "status": "invalid_image",
@@ -284,8 +229,7 @@ async def configure_ai_provider(cfg: AIProviderConfigRequest):
     """Persist the selected response provider and local Ollama settings."""
     if cfg.api_key and cfg.api_key.strip():
         if not board_ai_service.set_api_key(cfg.api_key):
-            raise HTTPException(status_code=500, detail="Failed to save Gemini API key.")
-        gemini_service.api_key = cfg.api_key.strip()
+            raise HTTPException(status_code=500, detail="Failed to save Google AI API key.")
     try:
         saved = ai_provider_settings.configure(
             cfg.provider, cfg.ollama_base_url, cfg.ollama_model)
@@ -299,176 +243,27 @@ async def configure_ai_provider(cfg: AIProviderConfigRequest):
 async def set_board_api_key(cfg: Dict[str, str]):
     key = cfg.get("api_key", "").strip()
     success = board_ai_service.set_api_key(key)
-    if success:
-        gemini_service.api_key = key
     return JSONResponse(content={"status": "saved" if success else "failed", "configured": board_ai_service.is_configured()})
-
-
-class TurnRequest(BaseModel):
-    page_number: int = Field(default=1, ge=1, le=100000)
-    image_base64: str = Field(default="", max_length=12_000_000)
-    stroke_data: Optional[List[dict]] = None
-    user_text_hint: Optional[str] = Field(default=None, max_length=1000)
-    persona_id: str = "tom_riddle"
-
-@app.post("/api/v1/process-turn")
-async def process_turn(req: TurnRequest):
-    """
-    Core multimodal interaction turn:
-    1. Analyzes handwritten canvas stroke vector coordinates (online HTR) + image.
-    2. Computes temperature-calibrated confidence score.
-    3. Handles diegetic clarification if confidence < tau.
-    4. Retrieves episodic memory context.
-    5. Generates persona-aligned AI reply.
-    6. Extracts & stores new user proposition.
-    """
-    try:
-        # Step 1: Handwriting Recognition & Calibration
-        has_hint = bool(req.user_text_hint and len(req.user_text_hint.strip()) > 0)
-        if has_hint:
-            transcription = req.user_text_hint.strip()
-            confidence = None
-            clarification_required = False
-            htr_result = {"transcription": transcription, "confidence": None,
-                          "confidence_status": "user_confirmed", "is_empty": False}
-        else:
-            htr_result = htr_engine.recognize(req.image_base64)
-            transcription = htr_result["transcription"]
-            confidence = htr_result["calibrated_confidence"]
-            clarification_required = htr_result["clarification_required"]
-
-        if htr_result.get("is_empty") and not has_hint:
-            return JSONResponse(status_code=200, content={
-                "transcription": "",
-                "confidence": None,
-                "clarification_required": False,
-                "ai_reply": "",
-                "retrieved_memories": [], "state": "empty"
-            })
-
-        # Step 2: Gating on Calibrated Uncertainty
-        if clarification_required and not req.user_text_hint:
-            clarification_msg = htr_result.get("clarification_prompt", "Thy ink was faint and troubled... Didst thou speak to me?")
-            return JSONResponse(status_code=200, content={
-                "transcription": transcription,
-                "confidence": confidence,
-                "clarification_required": True,
-                "ai_reply": clarification_msg,
-                "retrieved_memories": [],
-                "debug": htr_result, "state": "clarification_required"
-            })
-
-        # Step 3: Episodic Memory Retrieval
-        memories = memory_engine.retrieve_relevant_memories(transcription, top_k=3)
-        history = memory_engine.get_page_history()
-
-        # Step 4: Persona Dialogue Generation (Live Gemini LLM or Dynamic Engine)
-        ai_reply = persona_engine.generate_reply(
-            user_query=transcription,
-            persona_id=req.persona_id,
-            retrieved_memories=memories,
-            history=history
-        )
-
-        # Step 5: Extract proposition & commit to memory
-        memory_engine.extract_and_store_proposition(transcription)
-
-        # Step 6: Record page turn
-        memory_engine.record_page_turn(
-            page_number=req.page_number,
-            user_text=transcription,
-            ai_reply=ai_reply,
-            confidence=confidence,
-            persona=req.persona_id
-        )
-
-        return JSONResponse(status_code=200, content={
-            "transcription": transcription,
-            "confidence": confidence,
-            "clarification_required": False,
-            "ai_reply": ai_reply,
-            "retrieved_memories": memories,
-            "debug": htr_result, "state": "completed",
-            "reply_source": persona_engine.last_reply_source,
-            "reply_warning": (
-                ollama_service.last_error if persona_engine.last_reply_source == "local_fallback"
-                and ai_provider_settings.provider == "ollama" else
-                gemini_service.last_error if persona_engine.last_reply_source == "local_fallback"
-                else None
-            )
-        })
-    except RuntimeError as e:
-        print(f"[ProcessTurn] HTR unavailable: {e}")
-        raise HTTPException(status_code=503, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
-        print(f"[ProcessTurn] {type(e).__name__}: {e}")
-        raise HTTPException(status_code=500, detail="Diary turn failed. Your writing has been retained in the browser.")
 
 @app.get("/api/v1/htr/status")
 async def get_htr_status():
-    status = htr_engine.status()
-    status["inactivity_ms"] = max(5000, min(15000, int(os.getenv("HTR_INACTIVITY_MS", "12000"))))
-    status["retry_available"] = True
-    status["google_fallback_configured"] = google_htr_service.is_configured()
-    status["google_hwr_model"] = google_htr_service.model if google_htr_service.is_configured() else None
-    status["google_hwr_fallback_model"] = google_htr_service.fallback_model if google_htr_service.is_configured() else None
+    configured = google_htr_service.is_configured()
+    status = {
+        "available": configured,
+        "configured": configured,
+        "loaded": False,
+        "loading": False,
+        "model_source": "google",
+        "model_name": google_htr_service.model,
+        "model_label": "GOOGLE GEMINI VISION — EXTERNAL HANDWRITING RECOGNITION",
+        "recognizer": "Google Gemini Vision",
+        "external_service": True,
+        "confidence_status": "google_unscored",
+        "inactivity_ms": max(5000, min(15000, int(os.getenv("HTR_INACTIVITY_MS", "12000")))),
+        "retry_available": True,
+        "error": None if configured else "Set GEMINI_API_KEY.",
+    }
     return JSONResponse(content=status)
-
-@app.get("/api/v1/config/gemini-status")
-async def get_gemini_status():
-    from models.gemini_service import gemini_service
-    provider = ai_provider_settings.provider
-    if provider == "ollama":
-        status = await run_in_threadpool(ollama_service.status)
-        return JSONResponse(content={
-            "configured": status["model_available"],
-            "provider": provider,
-            "model": status["model"],
-            "error": status["error"],
-        })
-    return JSONResponse(content={
-        "configured": gemini_service.is_configured(),
-        "provider": provider,
-        "model": gemini_service.model_name,
-    })
-
-class KeyConfig(BaseModel):
-    api_key: str
-
-@app.post("/api/v1/config/gemini-key")
-async def set_gemini_key(cfg: KeyConfig):
-    from models.gemini_service import gemini_service
-    success = gemini_service.set_api_key(cfg.api_key)
-    return JSONResponse(content={"status": "saved" if success else "failed", "configured": gemini_service.is_configured()})
-
-@app.get("/api/v1/memories")
-async def get_memories():
-    return JSONResponse(content=memory_engine.list_all_memories())
-
-@app.delete("/api/v1/memories/{memory_id}")
-async def delete_memory(memory_id: int):
-    success = memory_engine.delete_memory(memory_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Memory proposition not found.")
-    return JSONResponse(content={"status": "deleted", "id": memory_id})
-
-@app.post("/api/v1/memories/purge")
-async def purge_memories():
-    memory_engine.purge_all_memories()
-    return JSONResponse(content={"status": "purged", "message": "All memories and pages wiped."})
-
-@app.get("/api/v1/pages")
-async def get_pages():
-    return JSONResponse(content=memory_engine.get_page_history())
-
-@app.get("/api/v1/personas")
-async def get_personas():
-    return JSONResponse(content=[
-        {"id": k, "name": v["name"], "description": v["description"]}
-        for k, v in persona_engine.personas.items()
-    ])
 
 # Serve static files and HTML
 static_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
@@ -484,4 +279,4 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("APP_PORT", "8000")), reload=True)

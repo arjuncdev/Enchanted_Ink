@@ -1,0 +1,42 @@
+{
+  "created_utc": "2026-11-20T13:21:29Z",
+  "checkpoint": "seaandsun/enchanted-ink-trocr",
+  "dataset": {
+    "source": "https://www.kaggle.com/datasets/sushant097/english-handwritten-line-dataset",
+    "manifest_lines": 336,
+    "train": 268,
+    "validation": 33,
+    "test": 35,
+    "split_method": "line-level (writer IDs unavailable)",
+    "writer_disjoint": false,
+    "license": "not specified in source manifest"
+  },
+  "engine": {
+    "model": "trocr",
+    "model_id": "seaandsun/enchanted-ink-trocr",
+    "model_source": "fine_tuned",
+    "status": "ready",
+    "error": null,
+    "loading_seconds": 4.773141785000007,
+    "download_seconds": null,
+    "model_load_seconds": 4.773141785000007,
+    "model_size_bytes": 1339315010,
+    "runtime": "local CPU"
+  },
+  "system": {
+    "os": "Linux-7.0.0-43-generic-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "cpu": "13th Gen Intel(R) Core(TM) i3-1315U",
+    "logical_cpu_count": 8,
+    "ram_total_bytes": 7888863232,
+    "process_ram_bytes_at_end": 1551036416,
+    "peak_ram_bytes": 1873813504
+  },
+  "evaluation": {
+    "models": [
+      "trocr"
+    ],
+    "seed": 42,
+    "bootstrap_iterations": 1000
+  }
+}

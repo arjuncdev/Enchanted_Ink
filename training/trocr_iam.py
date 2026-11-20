@@ -614,6 +614,7 @@ def train(args):
 
 
 def main():
+    # Define dataset preparation, repair, and model-training command workflows.
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     prepare = sub.add_parser("prepare")
@@ -651,6 +652,7 @@ def main():
         help="Split by line when writer IDs are unavailable; evaluation will not be writer-disjoint",
     )
     args = parser.parse_args()
+    # Dispatch the selected workflow and report expected input errors as CLI errors.
     try:
         if args.command == "prepare":
             count = prepare_manifest(args.iam_root, args.manifest)

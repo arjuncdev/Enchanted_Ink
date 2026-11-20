@@ -1,8 +1,6 @@
 /**
  * =========================================================================
- * ENCHANTED INK — AI WHITEBOARD CONTROLLER
- * High-Productivity Spatial Canvas with Krita-Inspired Inking Engine
- * Selective @board Ink Dissolution & Native Visual AI Generation
+ * Main function: control canvas tools, handwriting recognition, and @board actions.
  * =========================================================================
  */
 
@@ -308,7 +306,6 @@ class WhiteboardApp {
     this.lastHtrPreserveInk = false;
     this.htrBusy = false;
     this.inkActivityVersion = 0;
-    this.googleHtrConfigured = false;
     this.manualHtrNeedsBoardPrefix = false;
     this.manualHtrConfirmationPending = false;
 
@@ -990,7 +987,6 @@ class WhiteboardApp {
       if (Number.isFinite(status.inactivity_ms)) {
         this.htrDebounceMs = Math.max(5000, Math.min(15000, status.inactivity_ms));
       }
-      this.googleHtrConfigured = Boolean(status.google_fallback_configured);
     } catch (_) { /* Retain the safe local debounce default. */ }
   }
 
@@ -1116,9 +1112,9 @@ class WhiteboardApp {
     if (automatic) {
       document.getElementById('handwritingFeedback')?.classList.remove('visible');
     } else {
-      this.setHandwritingStatus(this.googleHtrConfigured
-        ? 'Recognising handwriting; Google Gemini Vision is available as a fallback…'
-        : 'Recognising handwriting with the local TrOCR model…', { retryable: true });
+      this.setHandwritingStatus(
+        'Sending handwriting image to the external recognition service…',
+        { retryable: true });
     }
     const requestId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `htr_${Date.now()}`;
     try {
@@ -1141,20 +1137,19 @@ class WhiteboardApp {
         return;
       }
       if (!response.ok || !data.success) {
-        const message = data.error || data.detail || 'Handwriting recognition failed.';
+        const message = this.toPopupMessage(data.error || data.detail || 'Handwriting recognition failed.');
         if (data.status === 'unavailable' || response.status === 503) {
-          this.setHandwritingStatus(`Handwriting model unavailable: ${message} Your ink is preserved. Retry after checking the model setup, or enter a transcription below.`,
+          this.setHandwritingStatus(`External handwriting recognition is unavailable: ${message} Your ink is preserved. Retry after checking the service setup, or enter a transcription below.`,
             { editable: true, retryable: true });
           return;
         }
         throw new Error(message);
       }
       const recognized = (data.text || '').trim();
-      const modelNotice = data.model_label ? `${data.model_label}. ` : '';
-      const googleWarning = data.recognition_warning ?
-        `Google handwriting fallback unavailable: ${String(data.recognition_warning).slice(0, 180)}. ` : '';
+      const modelNotice = data.confidence_status === 'google_unscored'
+        ? 'External recognition result is unscored. ' : '';
       if (!recognized) {
-        this.setHandwritingStatus(`${modelNotice}${googleWarning}Could not recognize handwriting. Your strokes remain on the board; retry or edit the transcription.`,
+        this.setHandwritingStatus(`${modelNotice}Could not recognize handwriting. Your strokes remain on the board; retry or edit the transcription.`,
           { editable: true, retryable: true });
         return;
       }
@@ -1217,7 +1212,7 @@ class WhiteboardApp {
       }
       this.setHandwritingStatus(`${modelNotice}Command detected: ${data.command_text}. Generating board objects…`);
       await this.executeAiCommand(`@board ${data.command_text}`, crop.bounds, strokes,
-        data.recognition_warning, automatic ? activityVersion : null);
+        automatic ? activityVersion : null);
     } catch (error) {
       this.setHandwritingStatus(`Could not recognize handwriting: ${error.message}. Your original ink is preserved.`,
         { editable: true, retryable: true });
@@ -1357,7 +1352,7 @@ class WhiteboardApp {
   }
 
   async executeAiCommand(overrideCommand = null, overrideInsertionPoint = null, sourceStrokes = null,
-                        recognitionWarning = null, recognitionVersion = null) {
+                        recognitionVersion = null) {
     const input = document.getElementById('aiCommandInput');
     const submitBtn = document.getElementById('btnSubmitAiCommand');
 
@@ -1419,10 +1414,10 @@ class WhiteboardApp {
         this.mergePendingInkStrokes(sourceStrokes || []);
         return;
       }
-      if (!response.ok) throw new Error(data.detail || `Board request failed (${response.status}).`);
+      if (!response.ok) throw new Error(this.toPopupMessage(data.detail || `Board request failed (${response.status}).`));
       if (!data || typeof data.batch_id !== 'string' || !data.batch_id ||
           !Array.isArray(data.objects) || data.objects.length === 0) {
-        throw new Error((data && data.summary) || 'The provider returned no valid canvas objects.');
+        throw new Error(this.toPopupMessage((data && data.summary) || 'The provider returned no valid canvas objects.'));
       }
       if (data.objects.length > 80) throw new Error('The provider returned too many objects; nothing was inserted.');
       this.validateAiObjects(data.objects);
@@ -1440,24 +1435,24 @@ class WhiteboardApp {
           this.manualHtrConfirmationPending = false;
           this.manualHtrNeedsBoardPrefix = false;
         }
-        const mode = data.provider_status === 'gemini' ? 'Gemini' :
+        const mode = data.provider_status === 'gemini' ? 'AI' :
           (data.provider_status === 'ollama' ? 'Ollama (local)' :
           (data.provider_status === 'fallback' ? 'Rule-based fallback' :
             (data.provider_status === 'local' ? 'Built-in illustration' : 'Provider')));
-        const warning = data.warnings && data.warnings.length ? ` — ${data.warnings.join(' ')}` : '';
-        this.showAiNotification(`${mode}: ${data.summary || 'Objects added.'}${warning}`,
+        const warning = data.warnings && data.warnings.length
+          ? ` — ${this.toPopupMessage(data.warnings.join(' '))}` : '';
+        this.showAiNotification(`${mode}: ${data.objects.length} objects added.${warning}`,
           data.provider_status !== 'fallback');
         if (sourceStrokes?.length) {
-          const warning = recognitionWarning ? ` Google handwriting service was unavailable: ${String(recognitionWarning).slice(0, 180)}.` : '';
-          this.setHandwritingStatus(`Completed: ${data.objects.length} editable objects placed. Provider: ${data.provider || mode}${data.fallback_used ? ' (fallback)' : ''}.${warning}`);
+          this.setHandwritingStatus(`Completed: ${data.objects.length} editable objects placed.${data.fallback_used ? ' A fallback response was used.' : ''}`);
         }
         if (input && !overrideCommand) input.value = '';
       }
     } catch (err) {
       console.error('[WhiteboardApp] AI Command Error:', err);
-      this.showAiNotification(`Board command failed: ${err.message || 'Check the provider connection.'}`, false);
+      this.showAiNotification(`Board command failed: ${this.toPopupMessage(err.message || 'Check the provider connection.')}`, false);
       if (sourceStrokes?.length) {
-        this.setHandwritingStatus(`The board request failed: ${err.message || 'provider error'}. Original command ink is still on the canvas.`,
+        this.setHandwritingStatus(`The board request failed: ${this.toPopupMessage(err.message || 'provider error')}. Original command ink is still on the canvas.`,
           { editable: true, retryable: true,
             transcription: document.getElementById('handwritingTranscription')?.value || command });
       }
@@ -2282,6 +2277,12 @@ class WhiteboardApp {
   // GEMINI CONFIG MODAL & STATUS
   // =========================================================================
 
+  toPopupMessage(message) {
+    return String(message || '')
+      .replace(/\b(?:Google\s+)?Gemini(?:[\w.-]*)?\b/gi, 'AI service')
+      .replace(/\bGoogle AI\b/gi, 'AI service');
+  }
+
   async checkGeminiConfig() {
     try {
       const resp = await fetch('/api/board/config/status');
@@ -2294,7 +2295,8 @@ class WhiteboardApp {
       const status = document.getElementById('aiProviderStatus');
       if (dot && label) {
         dot.className = data.configured ? 'save-dot' : 'save-dot unsaved';
-        label.textContent = data.configured ? `${data.provider} Ready` : `Configure ${data.provider || 'AI'}`;
+        const providerLabel = data.provider_id === 'gemini' ? 'Google AI' : (data.provider || 'AI');
+        label.textContent = data.configured ? `${providerLabel} Ready` : `Configure ${providerLabel}`;
       }
       this.aiProviderConfigured = data.configured;
       if (providerSelect && data.provider_id) providerSelect.value = data.provider_id;
@@ -2305,7 +2307,7 @@ class WhiteboardApp {
           ? (data.ollama?.model_available
             ? `Ollama is ready with ${data.model}.`
             : `${data.ollama?.error || 'Ollama is not ready.'} Start Ollama and install the selected model.`)
-          : (data.configured ? 'Gemini API key is configured.' : 'Enter a Gemini API key to use the cloud provider.');
+          : (data.configured ? 'Google AI API key is configured.' : 'Enter a Google AI API key to use the cloud provider.');
       }
     } catch (e) {
       console.warn('Failed to check AI provider status');
@@ -2329,7 +2331,7 @@ class WhiteboardApp {
       const status = document.getElementById('aiProviderStatus');
       const saveButton = document.getElementById('btnSaveApiKey');
       if (provider === 'gemini' && !key && !this.aiProviderConfigured) {
-        if (status) status.textContent = 'Enter a Gemini API key, or switch to Ollama for local inference.';
+        if (status) status.textContent = 'Enter a Google AI API key, or switch to Ollama for local inference.';
         return;
       }
       if (saveButton) saveButton.disabled = true;
@@ -2351,13 +2353,16 @@ class WhiteboardApp {
             ? (data.ollama?.model_available
               ? `Ollama is ready with ${data.model}.`
               : `Settings saved, but ${data.ollama?.error || 'Ollama is not ready.'} Start Ollama and run: ollama pull ${data.model}`)
-            : 'Gemini provider selected. API key saved locally on the server.';
+            : 'Google AI selected. API key saved locally on the server.';
         }
         const dot = document.getElementById('geminiConfigDot');
         const label = document.getElementById('geminiConfigLabel');
         this.aiProviderConfigured = data.configured;
         if (dot) dot.className = data.configured ? 'save-dot' : 'save-dot unsaved';
-        if (label) label.textContent = data.configured ? `${data.provider} Ready` : `Configure ${data.provider}`;
+        if (label) {
+          const providerLabel = provider === 'gemini' ? 'Google AI' : data.provider;
+          label.textContent = data.configured ? `${providerLabel} Ready` : `Configure ${providerLabel}`;
+        }
         if (data.configured) document.getElementById('settingsModal')?.classList.remove('open');
         if (keyInput) keyInput.value = '';
       } catch (err) {

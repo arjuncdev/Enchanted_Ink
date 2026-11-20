@@ -1,0 +1,68 @@
+{
+  "title": "Tr OCR \u2014 Enchanted Ink handwriting evaluation",
+  "created_utc": "2026-11-20T13:21:29Z",
+  "model": "seaandsun/enchanted-ink-trocr",
+  "checkpoint_source": "Hugging Face model checkpoint, locally downloaded",
+  "dataset": {
+    "source": "https://www.kaggle.com/datasets/sushant097/english-handwritten-line-dataset",
+    "manifest_lines": 336,
+    "train": 268,
+    "validation": 33,
+    "test": 35,
+    "split_method": "line-level (writer IDs unavailable)",
+    "writer_disjoint": false,
+    "license": "not specified in source manifest"
+  },
+  "test_metrics": {
+    "metric_samples": 35,
+    "successful_samples": 35,
+    "successful_recognition_rate": 1.0,
+    "cer": 0.13225371120107962,
+    "cer_bootstrap_95ci": [
+      0.07864412531584324,
+      0.2115831446153909
+    ],
+    "wer": 0.3787878787878788,
+    "wer_bootstrap_95ci": [
+      0.27999626865671645,
+      0.5061741201782696
+    ],
+    "exact_line_match_accuracy": 0.11428571428571428,
+    "exact_line_match_accuracy_bootstrap_95ci": [
+      0.02857142857142857,
+      0.22857142857142856
+    ],
+    "character_alignment_accuracy": 0.8677462887989204,
+    "word_alignment_accuracy": 0.6212121212121212,
+    "character_micro_precision": 0.8835316217908579,
+    "character_micro_recall": 0.9520917678812416,
+    "character_micro_f1": 0.9165313413445924,
+    "character_macro_f1": 0.6664203281978918,
+    "character_weighted_f1": 0.9230493258447453,
+    "word_micro_f1": 0.7298245614035088,
+    "average_latency_seconds": 12.349908265828605,
+    "median_latency_seconds": 11.45744853100041,
+    "p95_latency_seconds": 20.015444272899707,
+    "character_substitutions": 61,
+    "character_insertions": 125,
+    "character_deletions": 10,
+    "word_substitutions": 54,
+    "word_insertions": 44,
+    "word_deletions": 2
+  },
+  "hardware": {
+    "os": "Linux-7.0.0-43-generic-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "cpu": "13th Gen Intel(R) Core(TM) i3-1315U",
+    "logical_cpu_count": 8,
+    "ram_total_bytes": 7888863232,
+    "process_ram_bytes_at_end": 1551036416,
+    "peak_ram_bytes": 1873813504
+  },
+  "limitations": [
+    "35 test lines only",
+    "line-level split; writer identifiers unavailable",
+    "dataset license is not listed in manifest",
+    "inference times are measured on this local environment"
+  ]
+}

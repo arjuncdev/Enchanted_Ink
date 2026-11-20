@@ -1,30 +1,19 @@
-<<<<<<< HEAD
-.venv/
-venv/
-__pycache__/
-*.pyc
-
-models/
-test_images/
-*.safetensors
-*.pt
-*.pth
-
-evaluation/iam_predictions.csv
-
-.env
-.vscode/
-.ipynb_checkpoints/
-=======
 .env
 .env.*
 !.env.example
 venv/
 __pycache__/
 *.py[cod]
-backend/data/enchanted_diary.db
-models/trocr-iam/
+backend/data/whiteboard.db
 training-output/
-*.safetensors
 pytorch_model.bin
->>>>>>> friend/main
+.cache/
+__pycache__/
+evaluation/.venv/
+venv/
+reports/Tr OCR/predictions.csv
+reports/Tr OCR/sample_errors.csv
+reports/Tr OCR/index.html
+stylus-model/.cache/
+reports/htr_comparison/
+evaluation/datasets/*.csv
